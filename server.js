@@ -17,7 +17,13 @@ app.use(express.json());
 app.post('/api/chat', upload.single('image'), async (req, res) => {
     try {
         const prompt = req.body.prompt;
-        const selectedModel = req.body.model || 'gemini-1.5-flash';
+       // استبدل استدعاء النموذج بهذا الشكل:
+        const selectedModel = req.body.model || 'gemini-2.0-flash';
+
+        const model = genAI.getGenerativeModel(
+            { model: selectedModel },
+            { apiVersion: 'v1beta' }
+        );
         
         const model = genAI.getGenerativeModel({ model: selectedModel });
 
