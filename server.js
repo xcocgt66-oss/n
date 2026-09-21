@@ -11,20 +11,14 @@ const port = process.env.PORT || 3000;
 const upload = multer({ dest: 'uploads/' });
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// التأكد من قراءة الملفات الثابتة من مجلد public
 app.use(express.static('public'));
 app.use(express.json());
-
-// التوجيه المباشر للصفحة الرئيسية لتجنب خطأ Cannot GET /
-app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
 
 app.post('/api/chat', upload.single('image'), async (req, res) => {
     try {
         const prompt = req.body.prompt;
-        // استقبال اسم النموذج من الواجهة، والافتراضي فلاش
         const selectedModel = req.body.model || 'gemini-1.5-flash';
+        
         const model = genAI.getGenerativeModel({ model: selectedModel });
 
         let result;
@@ -37,12 +31,10 @@ app.post('/api/chat', upload.single('image'), async (req, res) => {
                     mimeType: req.file.mimetype
                 }
             };
-            result = await model.generateContent([prompt || "اشرح لي هذه الصورة بالتفصيل", imagePart]);
-            fs.unlinkSync(req.file.path); 
+            result = await model.generateContent([prompt || "اشرح هذه الصورة بالتفصيل", imagePart]);
+            fs.unlinkSync(req.file.path); // مسح الصورة بعد المعالجة
         } else {
-            if (!prompt) {
-                return res.status(400).json({ error: 'الرجاء إدخال نص أو إرفاق صورة.' });
-            }
+            if (!prompt) return res.status(400).json({ error: 'يرجى كتابة رسالة.' });
             result = await model.generateContent(prompt);
         }
 
@@ -50,11 +42,9 @@ app.post('/api/chat', upload.single('image'), async (req, res) => {
         res.json({ response: responseText });
 
     } catch (error) {
-        console.error("API Error Details:", error);
-        res.status(500).json({ error: error.message || 'حدث خطأ في الاتصال بنموذج الذكاء الاصطناعي.' });
+        console.error("API Error:", error);
+        res.status(500).json({ error: error.message || 'حدث خطأ في الاتصال بالنموذج.' });
     }
 });
 
-app.listen(port, () => {
-    console.log(`Server is running on port ${port}`);
-});
+app.listen(port, () => console.log(`Server running on port ${port}`));
