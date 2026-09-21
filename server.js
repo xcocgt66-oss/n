@@ -8,25 +8,28 @@ require('dotenv').config();
 const app = express();
 const port = process.env.PORT || 3000;
 
-// إعداد مجلد مؤقت لاستقبال الصور (Screenshots)
 const upload = multer({ dest: 'uploads/' });
-
-// تهيئة مفتاح الذكاء الاصطناعي
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
+// التأكد من قراءة الملفات الثابتة من مجلد public
 app.use(express.static('public'));
 app.use(express.json());
 
+// التوجيه المباشر للصفحة الرئيسية لتجنب خطأ Cannot GET /
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
 app.post('/api/chat', upload.single('image'), async (req, res) => {
     try {
-        const prompt = req.body.prompt || "اشرح لي ما في هذه الصورة";
-        // استخدام موديل فلاش لأنه سريع ويدعم الصور
-        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+        const prompt = req.body.prompt;
+        // استقبال اسم النموذج من الواجهة، والافتراضي فلاش
+        const selectedModel = req.body.model || 'gemini-1.5-flash';
+        const model = genAI.getGenerativeModel({ model: selectedModel });
 
         let result;
 
         if (req.file) {
-            // إذا كان هناك صورة (سكرين شوت)
             const fileData = fs.readFileSync(req.file.path);
             const imagePart = {
                 inlineData: {
@@ -34,11 +37,12 @@ app.post('/api/chat', upload.single('image'), async (req, res) => {
                     mimeType: req.file.mimetype
                 }
             };
-            result = await model.generateContent([prompt, imagePart]);
-            // مسح الصورة من السيرفر بعد معالجتها لتوفير المساحة
+            result = await model.generateContent([prompt || "اشرح لي هذه الصورة بالتفصيل", imagePart]);
             fs.unlinkSync(req.file.path); 
         } else {
-            // إذا كان نص فقط
+            if (!prompt) {
+                return res.status(400).json({ error: 'الرجاء إدخال نص أو إرفاق صورة.' });
+            }
             result = await model.generateContent(prompt);
         }
 
@@ -46,13 +50,11 @@ app.post('/api/chat', upload.single('image'), async (req, res) => {
         res.json({ response: responseText });
 
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'حدث خطأ أثناء معالجة الطلب.' });
+        console.error("API Error Details:", error);
+        res.status(500).json({ error: error.message || 'حدث خطأ في الاتصال بنموذج الذكاء الاصطناعي.' });
     }
 });
-app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
-});
+
 app.listen(port, () => {
     console.log(`Server is running on port ${port}`);
 });
