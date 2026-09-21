@@ -1,42 +1,155 @@
 <!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Free Unlimited AI Chatbot</title>
-    <link rel="stylesheet" href="style.css">
-  </head>
-  <body>
-    <div id="chatHeader">Free Unlimited AI Chatbot</div>
-    <div id="chatContainer"></div>
-    <button id="scrollBtn">↓</button>
-    <div id="inputContainer">
-      <select id="modelSelect"></select>
-      <textarea id="userInput" placeholder="Type your message..." autocomplete="off" rows="1"></textarea>
-      <button id="sendBtn">Send</button>
-      <button id="themeToggle">🌙</button>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- التايتل فارغ تماماً كما طلبت -->
+    <title></title> 
+    <style>
+        /* إخفاء كل شيء في البداية لتكون شاشة بيضاء فقط */
+        body {
+            background-color: white;
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        #app-container {
+            display: none; /* مخفي بالكامل */
+            max-width: 900px;
+            margin: 50px auto;
+            background: #f9f9f9;
+            border-radius: 10px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+            padding: 20px;
+            height: 85vh;
+            flex-direction: column;
+        }
+        #chat-box {
+            flex: 1;
+            overflow-y: auto;
+            border: 1px solid #ccc;
+            padding: 10px;
+            border-radius: 5px;
+            background: #fff;
+            margin-bottom: 10px;
+        }
+        .message {
+            margin: 10px 0;
+            padding: 15px;
+            border-radius: 8px;
+            line-height: 1.5;
+        }
+        .user-msg { background: #d1e7dd; text-align: right; }
+        .ai-msg { background: #e2e3e5; text-align: right; }
+        .input-group {
+            display: flex;
+            gap: 10px;
+        }
+        input[type="text"] {
+            flex: 1;
+            padding: 12px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+        input[type="file"] {
+            padding: 10px;
+        }
+        button {
+            padding: 10px 20px;
+            background: #28a745;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- الواجهة الحقيقية للموقع (مخفية) -->
+    <div id="app-container">
+        <div id="chat-box"></div>
+        <div class="input-group">
+            <input type="file" id="imageInput" accept="image/*" title="ارفع سكرين شوت">
+            <input type="text" id="promptInput" placeholder="اكتب سؤالك هنا أو أرفق صورة..." onkeypress="handleEnter(event)">
+            <button onclick="sendMessage()">إرسال</button>
+        </div>
     </div>
-    <script src="https://js.puter.com/v2/"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-javascript.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-markup.min.js"></script>
-    <script src="app.js"></script>
-  </body>
-  <script>
-  // Set theme class on <body> before CSS loads to prevent flash
-  (function() {
-    try {
-      var theme = localStorage.getItem('ollama-theme') || 'system';
-      var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-      var body = document.body;
-      body.classList.remove('dark', 'light');
-      if (theme === 'dark' || (theme === 'system' && prefersDark)) {
-        body.classList.add('dark');
-      } else if (theme === 'light') {
-        body.classList.add('light');
-      }
-    } catch (e) {}
-  })();
-</script>
+
+    <script>
+        // لوجيك فتح الموقع بالضغط 5 مرات على حرف Y
+        let yCount = 0;
+        document.addEventListener('keydown', (e) => {
+            // نتحقق إذا كانت الواجهة مخفية أصلاً
+            if (document.getElementById('app-container').style.display !== 'flex') {
+                if (e.key.toLowerCase() === 'y') {
+                    yCount++;
+                    if (yCount === 5) {
+                        // إظهار الواجهة وإلغاء الشاشة البيضاء
+                        document.body.style.backgroundColor = '#ececec';
+                        document.getElementById('app-container').style.display = 'flex';
+                        document.body.style.overflow = 'auto';
+                        document.getElementById('promptInput').focus();
+                    }
+                } else {
+                    yCount = 0; // تصفير العداد إذا ضغطت أي زر آخر بالخطأ
+                }
+            }
+        });
+
+        // السماح بالضغط على Enter للإرسال
+        function handleEnter(e) {
+            if (e.key === 'Enter') sendMessage();
+        }
+
+        async function sendMessage() {
+            const prompt = document.getElementById('promptInput').value;
+            const imageFile = document.getElementById('imageInput').files[0];
+            const chatBox = document.getElementById('chat-box');
+
+            if (!prompt && !imageFile) return;
+
+            // عرض رسالة المستخدم
+            let userMsgContent = prompt || '';
+            if (imageFile) userMsgContent += ' [صورة مرفقة]';
+            chatBox.innerHTML += `<div class="message user-msg"><strong>أنت:</strong> ${userMsgContent}</div>`;
+            
+            document.getElementById('promptInput').value = '';
+            document.getElementById('imageInput').value = '';
+            chatBox.scrollTop = chatBox.scrollHeight;
+
+            const formData = new FormData();
+            formData.append('prompt', prompt);
+            if (imageFile) {
+                formData.append('image', imageFile);
+            }
+
+            try {
+                // مؤشر التحميل
+                const loadingId = 'loading-' + Date.now();
+                chatBox.innerHTML += `<div class="message ai-msg" id="${loadingId}">جاري التفكير...</div>`;
+                chatBox.scrollTop = chatBox.scrollHeight;
+
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                document.getElementById(loadingId).remove();
+                
+                if (data.error) {
+                    chatBox.innerHTML += `<div class="message ai-msg" style="color:red;"><strong>خطأ:</strong> ${data.error}</div>`;
+                } else {
+                    const formattedText = data.response.replace(/\n/g, '<br>'); // تنسيق الأسطر
+                    chatBox.innerHTML += `<div class="message ai-msg">${formattedText}</div>`;
+                }
+                chatBox.scrollTop = chatBox.scrollHeight;
+            } catch (err) {
+                chatBox.innerHTML += `<div class="message ai-msg" style="color:red;"><strong>خطأ في الاتصال بالسيرفر.</strong></div>`;
+            }
+        }
+    </script>
+</body>
 </html>
