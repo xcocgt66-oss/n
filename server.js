@@ -50,7 +50,9 @@ app.post('/api/chat', upload.single('image'), async (req, res) => {
         res.status(500).json({ error: 'حدث خطأ أثناء معالجة الطلب.' });
     }
 });
-
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'index.html'));
+});
 app.listen(port, () => {
     console.log(`Server is running on port ${port}`);
 });
