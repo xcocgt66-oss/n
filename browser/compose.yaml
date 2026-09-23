@@ -1,0 +1,14 @@
+services:
+  browser:
+    build: .
+    restart: unless-stopped
+    shm_size: 1gb
+    environment:
+      CUSTOM_USER: spower
+      PASSWORD: ${BROWSER_SERVICE_PASSWORD:?Set BROWSER_SERVICE_PASSWORD}
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - browser-data:/config
+volumes:
+  browser-data:
