@@ -1,6 +1,10 @@
+# S-Power · Workspace update
+
+Start with [Arabic deployment instructions](DEPLOY-AR.md) for the redesigned UI, online NVIDIA/OpenRouter models, and the new Chromium streaming service.
+
 # S-Power
 
-Private Railway portal with a blank entry screen, server-side password check, screenshot browser, chat and optional Web Push, plus a Windows remote access agent.
+Private Railway portal with a blank entry screen, AI studio, Chromium streaming integration, chat and optional Web Push, plus a Windows remote access agent.
 
 ## Repository layout
 
@@ -26,7 +30,7 @@ s-power/
 ## Railway
 
 1. Push the files inside `s-power` to the root of a GitHub repository. Railway detects the Dockerfile and binds the server to its injected `PORT` on `0.0.0.0`.
-2. Set `SPOWER_PASSWORD` to your portal password and `SESSION_SECRET` to a random string of at least 32 characters. If you specifically need the requested demo PIN, enter `1010` as the Railway `SPOWER_PASSWORD` variable. A long unique password is strongly recommended. Never commit an `.env` file.
+2. Set the required `SPOWER_PASSWORD` service variable to your portal password in Railway, then deploy the staged variable change. `SESSION_SECRET` is not needed because sessions exist only in server memory. If you specifically need the requested demo PIN, enter `1010` as the Railway `SPOWER_PASSWORD` variable. A long unique password is strongly recommended. Never commit an `.env` file.
 3. Set `ALLOWED_BROWSER_HOSTS` to comma-separated trusted HTTPS domains. Each embedded page, image, and CDN domain must be listed separately. Only approved domains can be loaded in the screenshot browser.
 4. For push alerts, generate VAPID keys with `npx web-push generate-vapid-keys` and set `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` (for example `mailto:admin@example.com`).
 5. Attach a Railway public domain. Press Y five times in sequence or tap the lower-right corner rapidly three times to show the portal login.
@@ -43,7 +47,7 @@ The agent communicates outbound over WSS; it does not need an inbound port on th
 
 ## Operational limits
 
-Remote screenshots use substantial bandwidth. The browser engine also sends screenshots rather than site audio or smooth video. Some external websites require more CDN domains or reject automation. The ad filter can block approved known ad hosts, but is not a complete blocker. Chat, sessions, device connections, and push subscriptions are in process memory; a redeploy disconnects everyone. Run one replica; add a durable database and pub/sub before scaling. The hidden gesture is a UI choice, not a security boundary. Use strong portal and device passwords. Browser scripts and gestures can always be inspected by someone with DevTools; only the server checks the portal password.
+Remote screenshots use substantial bandwidth. The legacy screenshot endpoint remains available for compatibility. The Browser UI now uses the separate Selkies service described in DEPLOY-AR.md for video and audio. Some external websites require more CDN domains or reject automation. The ad filter can block approved known ad hosts, but is not a complete blocker. Chat, sessions, device connections, and push subscriptions are in process memory; a redeploy disconnects everyone. Run one replica; add a durable database and pub/sub before scaling. The hidden gesture is a UI choice, not a security boundary. Use strong portal and device passwords. Browser scripts and gestures can always be inspected by someone with DevTools; only the server checks the portal password.
 
 ## AI chat, photos, and usage
 

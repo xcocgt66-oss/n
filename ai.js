@@ -1,4 +1,7 @@
 const models = Object.freeze({
+  'openrouter/free': { provider: 'openrouter', label: 'Free Auto · OpenRouter', env: 'OPENROUTER_API_KEY' },
+  'nvidia/nemotron-nano-12b-v2-vl': { provider: 'nvidia', label: 'Nemotron Vision · NVIDIA', env: 'NVIDIA_API_KEY' },
+  'meta/llama-3.3-70b-instruct': { provider: 'nvidia', label: 'Llama 3.3 70B · NVIDIA', env: 'NVIDIA_API_KEY', vision: false },
   'gemini-3.8-flash': { provider: 'gemini', label: 'Gemini 3.8 Flash', env: 'GEMINI_API_KEY' },
   'gemini-3.1-pro-preview': { provider: 'gemini', label: 'Gemini 3.1 Pro', env: 'GEMINI_API_KEY' },
   'gpt-5.6-sol': { provider: 'openai', label: 'GPT-5.6 Sol', env: 'OPENAI_API_KEY' },
@@ -6,7 +9,7 @@ const models = Object.freeze({
 });
 
 export function availableModels() {
-  return Object.entries(models).map(([id, config]) => ({ id, label: config.label, provider: config.provider, ready: config.provider === 'local' || !!process.env[config.env] }));
+  return Object.entries(models).map(([id, config]) => ({ id, label: config.label, provider: config.provider, vision: config.vision !== false, ready: config.provider === 'local' || !!process.env[config.env] }));
 }
 
 export function modelInfo(id) { return models[id]; }
@@ -28,11 +31,16 @@ export function parseImage(image) {
 export async function cloudAnswer(id, history, image) {
   const config = models[id];
   if (!config || config.provider === 'local' || !process.env[config.env]) throw new Error('Set up this model API key on Railway');
+  if (image && config.vision === false) throw new Error('Choose a vision model for images');
   let url, headers, body;
   if (config.provider === 'gemini') {
     url = `https://generativelanguage.googleapis.com/v1beta/models/${id}:generateContent`;
     headers = { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY };
     body = { contents: history.map((turn, index) => ({ role: turn.role === 'assistant' ? 'model' : 'user', parts: [{ text: turn.text }, ...index === history.length - 1 && image ? [{ inline_data: { mime_type: image.mime, data: image.base64 } }] : []] })), generationConfig: { maxOutputTokens: 4096 } };
+  } else if (['openrouter', 'nvidia'].includes(config.provider)) {
+    url = config.provider === 'openrouter' ? 'https://openrouter.ai/api/v1/chat/completions' : 'https://integrate.api.nvidia.com/v1/chat/completions';
+    headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env[config.env]}` };
+    body = { model: id, stream: false, max_tokens: 4096, messages: history.map((turn, index) => ({ role: turn.role, content: index === history.length - 1 && image ? [{ type: 'text', text: turn.text }, { type: 'image_url', image_url: { url: image.dataUrl } }] : turn.text })) };
   } else {
     url = 'https://api.openai.com/v1/responses';
     headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` };
@@ -45,7 +53,7 @@ export async function cloudAnswer(id, history, image) {
     if (response.status === 401 || response.status === 403) throw new Error('API key is invalid or this model is unavailable to your account');
     throw new Error(`Model provider returned status ${response.status}`);
   }
-  const text = config.provider === 'gemini' ? payload.candidates?.[0]?.content?.parts?.filter(p => typeof p.text === 'string').map(p => p.text).join('\n') : payload.output?.flatMap(o => o.content || []).filter(c => c.type === 'output_text').map(c => c.text).join('\n');
-  if (!text) throw new Error('Model returned no text response');
+  const text = ['openrouter', 'nvidia'].includes(config.provider) ? payload.choices?.[0]?.message?.content : config.provider === 'gemini' ? payload.candidates?.[0]?.content?.parts?.filter(p => typeof p.text === 'string').map(p => p.text).join('\n') : payload.output?.flatMap(o => o.content || []).filter(c => c.type === 'output_text').map(c => c.text).join('\n');
+  if (typeof text !== 'string' || !text) throw new Error('Model returned no text response');
   return text.slice(0, 30000);
 }

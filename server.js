@@ -1,4 +1,5 @@
 import express from 'express';
+import httpProxy from 'http-proxy';
 import http from 'node:http';
 import crypto from 'node:crypto';
 import dns from 'node:dns/promises';
@@ -30,14 +31,30 @@ const wss = new WebSocketServer({ noServer: true, maxPayload: 8192 });
 const vapidReady = !!(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY && process.env.VAPID_SUBJECT);
 if (vapidReady) webpush.setVapidDetails(process.env.VAPID_SUBJECT, process.env.VAPID_PUBLIC_KEY, process.env.VAPID_PRIVATE_KEY);
 let browser;
+const streamUpstream = process.env.BROWSER_STREAM_UPSTREAM || '';
+const streamProxy = httpProxy.createProxyServer({ target: streamUpstream || 'http://127.0.0.1:3001', ws: true, changeOrigin: false, proxyTimeout: 3600000, timeout: 3600000 });
+let streamOwner = null;
+const streamSockets = new Set();
+function closeStream() { for (const socket of streamSockets) socket.destroy(); streamSockets.clear(); streamOwner = null; }
+streamProxy.on('error', (error, req, target) => { if (typeof target.writeHead === 'function') { if (!target.headersSent) target.writeHead(502, { 'Content-Type': 'text/plain' }); target.end('Browser service unavailable'); } else target.destroy(); });
+function streamHeaders(proxyReq) { proxyReq.removeHeader('cookie'); proxyReq.removeHeader('authorization'); if (process.env.BROWSER_SERVICE_PASSWORD) proxyReq.setHeader('Authorization', 'Basic ' + Buffer.from((process.env.BROWSER_SERVICE_USER || 'spower') + ':' + process.env.BROWSER_SERVICE_PASSWORD).toString('base64')); }
+streamProxy.on('proxyReq', streamHeaders);
+streamProxy.on('proxyReqWs', streamHeaders);
 
 app.disable('x-powered-by');
 app.use((req, res, next) => {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' wss: ws:; frame-src 'self' https:; object-src 'none'; base-uri 'none'; form-action 'self'");
+  if (!req.path.startsWith('/stream/')) res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' wss: ws:; frame-src 'self' https:; object-src 'none'; base-uri 'none'; form-action 'self'");
   next();
+});
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/stream/')) return next();
+  const session = getSession(req);
+  if (!session || session.id !== streamOwner) return res.status(401).send('Sign in to open the browser');
+  if (!streamUpstream) return res.status(503).send('Browser service unavailable');
+  streamProxy.web(req, res);
 });
 app.use('/api/ai/chat', express.json({ limit: '4mb' }));
 app.use(express.json({ limit: '20kb' }));
@@ -83,8 +100,9 @@ app.post('/api/login', sameOrigin, (req, res) => {
   setCookie(res, id);
   res.json({ ok: true });
 });
-app.get('/api/me', auth, (req, res) => res.json({ ok: true, vapid: vapidReady ? process.env.VAPID_PUBLIC_KEY : null, browserHosts: [...allow], aiModels: availableModels(), aiDailyLimit: process.env.AI_DAILY_REQUEST_LIMIT === undefined ? 100 : Math.max(0, Number(process.env.AI_DAILY_REQUEST_LIMIT) || 0) }));
+app.get('/api/me', auth, (req, res) => res.json({ ok: true, vapid: vapidReady ? process.env.VAPID_PUBLIC_KEY : null, browserHosts: [...allow], browserStream: !!streamUpstream, aiModels: availableModels(), aiDailyLimit: process.env.AI_DAILY_REQUEST_LIMIT === undefined ? 100 : Math.max(0, Number(process.env.AI_DAILY_REQUEST_LIMIT) || 0) }));
 app.post('/api/logout', sameOrigin, auth, async (req, res) => {
+  if (streamOwner === req.session.id) closeStream();
   sessions.delete(req.session.id);
   subscriptions.delete(req.session.id);
   const tab = browserTabs.get(req.session.id);
@@ -92,6 +110,14 @@ app.post('/api/logout', sameOrigin, auth, async (req, res) => {
   res.setHeader('Set-Cookie', 'sp_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0');
   res.json({ ok: true });
 });
+app.post('/api/browser/start', sameOrigin, auth, (req, res) => {
+  if (!streamUpstream) return res.status(503).json({ error: 'Browser service is offline' });
+  const owner = streamOwner && sessions.get(streamOwner);
+  if (owner && owner.expires > Date.now() && streamOwner !== req.session.id) return res.status(409).json({ error: 'Browser is in use' });
+  streamOwner = req.session.id;
+  res.json({ url: '/stream/' });
+});
+app.post('/api/browser/stop', sameOrigin, auth, (req, res) => { if (streamOwner === req.session.id) closeStream(); res.json({ ok: true }); });
 app.post('/api/remote/connect', sameOrigin, auth, (req, res) => {
   const code = typeof req.body.code === 'string' ? req.body.code.trim().toUpperCase() : '';
   const candidate = typeof req.body.password === 'string' ? req.body.password : '';
@@ -235,6 +261,15 @@ server.on('upgrade', (req, socket, head) => {
   const session = getSession(req);
   let path;
   try { path = new URL(req.url, 'http://localhost').pathname; } catch { socket.destroy(); return; }
+  if (path.startsWith('/stream/')) {
+    let valid = false;
+    try { valid = !!origin && new URL(origin).host === host; } catch {}
+    if (!streamUpstream || !session || session.id !== streamOwner || !valid) { socket.destroy(); return; }
+    streamSockets.add(socket);
+    socket.on('close', () => streamSockets.delete(socket));
+    streamProxy.ws(req, socket, head);
+    return;
+  }
   if (path === '/agent') {
     remoteWss.handleUpgrade(req, socket, head, ws => remoteWss.emit('connection', ws, req));
     return;
@@ -346,6 +381,7 @@ wss.on('connection', (ws, req, session) => {
 });
 setInterval(async () => {
   const now = Date.now();
+  if (streamOwner && (!sessions.has(streamOwner) || sessions.get(streamOwner).expires < now)) closeStream();
   for (const [id, session] of sessions) if (session.expires < now) { sessions.delete(id); subscriptions.delete(id); }
   for (const [id, tab] of browserTabs) if (!sessions.has(id) || now - tab.last > 15 * 60_000) { browserTabs.delete(id); await tab.context.close().catch(() => {}); }
   for (const [ip, entry] of attempts) if (entry.until < now && !entry.n) attempts.delete(ip);
