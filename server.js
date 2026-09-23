@@ -9,8 +9,7 @@ import webpush from 'web-push';
 import { availableModels, modelInfo, parseImage, cloudAnswer } from './ai.js';
 
 const password = process.env.SPOWER_PASSWORD;
-const secret = process.env.SESSION_SECRET;
-if (!password || !secret || secret.length < 32) throw new Error('Set SPOWER_PASSWORD and a SESSION_SECRET of at least 32 characters');
+if (!password) throw new Error('Missing SPOWER_PASSWORD: add it in Railway service Variables and deploy the staged change');
 const allow = new Set((process.env.ALLOWED_BROWSER_HOSTS || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean));
 const sessions = new Map();
 const attempts = new Map();
