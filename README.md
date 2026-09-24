@@ -1,61 +1,30 @@
-# S-Power · Workspace update
+# S-Power 1.3.0
 
-Start with [Arabic deployment instructions](DEPLOY-AR.md) for the redesigned UI, online NVIDIA/OpenRouter models, and the new Chromium streaming service.
+Railway portal with an AI studio, remote browser service, session-based public/private messaging and a visible Windows host utility.
 
-# S-Power
+See UPDATE-AR.md for this release and deployment steps. DEPLOY-AR.md covers the separate streaming browser.
 
-Private Railway portal with a blank entry screen, AI studio, Chromium streaming integration, chat and optional Web Push, plus a Windows remote access agent.
+## Layout
 
-## Repository layout
+- server.js: Express, authentication, provider routes, streaming proxy and remote relay
+- ai.js: provider catalog, selected models, accuracy policy and bounded retries
+- chat.js: presence, private message authorization, persistence and 24-hour retention
+- public/: UI, preferences, Markdown renderer, notifications and animated stickers
+- agent/: Windows Tkinter host source and launcher
+- downloads/S-Power-Host.zip: authenticated host download, included in Docker
+- browser/: separate Falkon/Selkies service
+- test/: automated provider, chat and streaming tests
 
-```
-s-power/
-  Dockerfile
-  .dockerignore
-  .env.example
-  .gitignore
-  package.json
-  server.js
-  ai.js
-  public/
-    index.html
-    style.css
-    app.js
-    sw.js
-  agent/
-    agent.py
-    requirements.txt
-```
+## Run
 
-## Railway
+Node.js 22 or newer. Install with npm ci. Set SPOWER_PASSWORD, then npm start. The server binds to 0.0.0.0 and Railway's PORT. Use HTTPS in production; authentication cookies are Secure. A blank white screen is intentional. Press Y five times or tap the bottom-right corner three times to open login. Gestures are not a security boundary and frontend code is inspectable.
 
-1. Push the files inside `s-power` to the root of a GitHub repository. Railway detects the Dockerfile and binds the server to its injected `PORT` on `0.0.0.0`.
-2. Set the required `SPOWER_PASSWORD` service variable to your portal password in Railway, then deploy the staged variable change. `SESSION_SECRET` is not needed because sessions exist only in server memory. If you specifically need the requested demo PIN, enter `1010` as the Railway `SPOWER_PASSWORD` variable. A long unique password is strongly recommended. Never commit an `.env` file.
-3. Set `ALLOWED_BROWSER_HOSTS` to comma-separated trusted HTTPS domains. Each embedded page, image, and CDN domain must be listed separately. Only approved domains can be loaded in the screenshot browser.
-4. For push alerts, generate VAPID keys with `npx web-push generate-vapid-keys` and set `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` (for example `mailto:admin@example.com`).
-5. Attach a Railway public domain. Press Y five times in sequence or tap the lower-right corner rapidly three times to show the portal login.
+Use one server replica. Set DATA_DIR=/data with a Railway Volume for message persistence. Sessions last eight hours and remain in memory. Restarting ends login identities, private-message access, live device connections and push subscriptions. Messages expire after 24 hours; deletion runs every ten seconds. Public history survives restarts on a volume, while private history requires the same session identity. This is a small private workspace, not a multi-tenant account system.
 
-## Windows agent installation
+AI history and images are stored in sessionStorage in the current browser tab, up to twenty conversations subject to browser storage limits. The server does not persist AI history. Providers receive the submitted history and image. Accuracy instructions cannot guarantee correctness. Gemini and NVIDIA trials remain subject to their provider limits. No API provider is made unlimited by this application.
 
-1. On a Windows PC that you own or administer, install Python 3.11 or newer and ensure the PC has outbound WSS access to your Railway domain.
-2. Copy the `agent` directory to the PC. In PowerShell from that directory run `py -m pip install -r requirements.txt`, then `py agent.py`.
-3. On first run enter the portal's HTTPS URL and choose a unique device password of at least 12 characters. The agent prints its device code and stores its configuration in `%APPDATA%\SPowerAgent\config.json`.
-4. Keep its console window running. To have it start after you sign in to Windows, create a Windows Task Scheduler task for `py` with the full path to `agent.py` as argument, running under your own user account with an interactive desktop. This setup is an explicit owner action. Close the agent window or stop the task to end remote availability.
-5. In the portal open `remote access rdp`, type the device code and device password, then click Connect. After the one-time local installation, no approval dialog appears on each connection. Only one controller can connect at a time.
+Optional AI_DAILY_REQUEST_LIMIT defaults to 100 successful cloud requests per session per UTC day; 0 removes the portal cap. It is not a provider billing guard. Failed requests are refunded locally; retries can still consume provider quota. OpenRouter requests set prompt/completion maximum prices to zero. OpenAI remains optional and may incur charges.
 
-The agent communicates outbound over WSS; it does not need an inbound port on the PC. It transmits a compressed screen approximately every 600 ms and receives mouse clicks, scrolling, and key presses. This is a custom remote desktop agent, not the Windows RDP protocol. It does not implement audio, clipboard, file transfer, multi-monitor selection, UAC secure-desktop interaction, or full-motion video. Windows must be signed in on an interactive desktop for input capture to work. The agent must remain visible and running on the authorized PC.
+Windows host: download from Remote Access, extract, install Python 3.11+ with Tkinter, run Start-Host.cmd, choose HTTPS portal URL and device password, then start. The app must remain visible and running. It provides screenshots and basic mouse/keyboard control only, without audio, clipboard, files, secure desktop or reliable non-Latin input. No auto-start or hidden persistence is installed. Protect the host config in %APPDATA%\SPowerAgent because it contains the device registration secret. The website remembers IDs, not device passwords.
 
-## Operational limits
-
-Remote screenshots use substantial bandwidth. The legacy screenshot endpoint remains available for compatibility. The Browser UI now uses the separate Selkies service described in DEPLOY-AR.md for video and audio. Some external websites require more CDN domains or reject automation. The ad filter can block approved known ad hosts, but is not a complete blocker. Chat, sessions, device connections, and push subscriptions are in process memory; a redeploy disconnects everyone. Run one replica; add a durable database and pub/sub before scaling. The hidden gesture is a UI choice, not a security boundary. Use strong portal and device passwords. Browser scripts and gestures can always be inspected by someone with DevTools; only the server checks the portal password.
-
-## AI chat, photos, and usage
-
-The **AI** tab supports normal conversation, pasted images with Ctrl+V, image uploads on mobile, and questions about the image. The browser compresses the image before sending it; accepted file types are PNG, JPEG, and WebP. Images are sent to the selected model. The server does not persist AI conversations or images.
-
-- `gemini-3.8-flash`: set `GEMINI_API_KEY` in Railway.
-- `gemini-3.1-pro-preview`: uses the same Gemini API key; your provider account must have access.
-- `gpt-5.6-sol`: set `OPENAI_API_KEY` in Railway. ChatGPT Plus does not supply API credits for this key.
-- `qwen3-vl:32b`: local text and image model. Install Ollama on the authorized Windows PC, run `ollama pull qwen3-vl:32b`, then run the updated Windows agent. In the AI tab select this model and enter the device code and its password. The agent calls Ollama on `127.0.0.1:11434` and forwards the answer through the existing outbound WSS connection. Do not publish Ollama's port. The model download is approximately 21 GB; inference needs enough memory and will be slow on modest PCs. Ollama 0.12.7 or newer is required.
-
-Local inference has no provider-side daily request quota, but available hardware, electricity, and internet bandwidth still constrain usage. Gemini and OpenAI set their own rate limits, quotas, and charges; the portal cannot make their paid models unlimited. Optional `AI_DAILY_REQUEST_LIMIT` defaults to 100 cloud requests per portal session in UTC days; `0` disables the portal cap. It never limits the local model. This cap is in process memory and is not a provider quota or billing guard. For public deployment, use a proper user account system and billing limits at each provider.
+Run npm test. Provider tests use mocked responses; they do not establish live account access. Docker and Windows runtime validation must be performed on the intended deployment.

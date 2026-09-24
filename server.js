@@ -1,4 +1,6 @@
 import express from 'express';
+import path from 'node:path';
+import { createChatStore, attachChat } from './chat.js';
 import httpProxy from 'http-proxy';
 import http from 'node:http';
 import crypto from 'node:crypto';
@@ -7,22 +9,19 @@ import net from 'node:net';
 import { WebSocketServer } from 'ws';
 import { chromium } from 'playwright';
 import webpush from 'web-push';
-import { availableModels, modelInfo, parseImage, cloudAnswer } from './ai.js';
+import { availableModels, refreshModels, modelDiagnostics, modelInfo, parseImage, cloudAnswer } from './ai.js';
 
 const password = process.env.SPOWER_PASSWORD;
 if (!password) throw new Error('Missing SPOWER_PASSWORD: add it in Railway service Variables and deploy the staged change');
 const allow = new Set((process.env.ALLOWED_BROWSER_HOSTS || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean));
 const sessions = new Map();
 const attempts = new Map();
-const sockets = new Map();
 const subscriptions = new Map();
-const history = [];
 const browserTabs = new Map();
 const agents = new Map();
 const remoteTickets = new Map();
 const remoteAttempts = new Map();
 const remoteWss = new WebSocketServer({ noServer: true, maxPayload: 6_000_000 });
-const aiPending = new Map();
 const aiUsage = new Map();
 const aiBusy = new Set();
 const app = express();
@@ -61,7 +60,7 @@ app.use(express.json({ limit: '20kb' }));
 
 function token(req) {
   const match = /(?:^|; )sp_session=([^;]+)/.exec(req.headers.cookie || '');
-  return match && decodeURIComponent(match[1]);
+  try { return match && decodeURIComponent(match[1]); } catch { return null; }
 }
 function getSession(req) {
   const id = token(req);
@@ -95,14 +94,18 @@ app.post('/api/login', sameOrigin, (req, res) => {
     return res.status(401).json({ error: 'Invalid password' });
   }
   attempts.delete(ip);
+  const existing = getSession(req);
+  if (existing) { setCookie(res, existing.id); return res.json({ ok: true }); }
   const id = crypto.randomBytes(32).toString('base64url');
-  sessions.set(id, { expires: Date.now() + 8 * 60 * 60_000 });
+  sessions.set(id, { expires: Date.now() + 8 * 60 * 60_000, chatId: crypto.randomUUID() });
   setCookie(res, id);
   res.json({ ok: true });
 });
-app.get('/api/me', auth, (req, res) => res.json({ ok: true, vapid: vapidReady ? process.env.VAPID_PUBLIC_KEY : null, browserHosts: [...allow], browserStream: !!streamUpstream, aiModels: availableModels(), aiDailyLimit: process.env.AI_DAILY_REQUEST_LIMIT === undefined ? 100 : Math.max(0, Number(process.env.AI_DAILY_REQUEST_LIMIT) || 0) }));
+app.get('/api/me', auth, async (req, res) => { await refreshModels(); res.json({ aiDiagnostics: modelDiagnostics(), ok: true, sessionTag: req.session.chatId, vapid: vapidReady ? process.env.VAPID_PUBLIC_KEY : null, browserHosts: [...allow], browserStream: !!streamUpstream, aiModels: availableModels(), aiDailyLimit: process.env.AI_DAILY_REQUEST_LIMIT === undefined ? 100 : Math.max(0, Number(process.env.AI_DAILY_REQUEST_LIMIT) || 0) }); });
 app.post('/api/logout', sameOrigin, auth, async (req, res) => {
   if (streamOwner === req.session.id) closeStream();
+  chat.disconnect(req.session.id);
+  for (const agent of agents.values()) if (agent.controllerSession === req.session.id) agent.controller?.close();
   sessions.delete(req.session.id);
   subscriptions.delete(req.session.id);
   const tab = browserTabs.get(req.session.id);
@@ -151,51 +154,23 @@ app.post('/api/ai/chat', sameOrigin, auth, async (req, res) => {
   const id = req.session.id;
   if (aiBusy.has(id)) return res.status(429).json({ error: 'Wait for your current response' });
   const day = new Date().toISOString().slice(0, 10);
-  const limit = info.provider === 'local' ? 0 : process.env.AI_DAILY_REQUEST_LIMIT === undefined ? 100 : Math.max(0, Number(process.env.AI_DAILY_REQUEST_LIMIT) || 0);
+  const limit = process.env.AI_DAILY_REQUEST_LIMIT === undefined ? 100 : Math.max(0, Number(process.env.AI_DAILY_REQUEST_LIMIT) || 0);
   const usage = aiUsage.get(id);
   const used = usage?.day === day ? usage.count : 0;
   if (limit && used >= limit) return res.status(429).json({ error: 'Daily limit reached; it resets at 00:00 UTC' });
-  if (info.provider !== 'local' && !process.env[info.env]) return res.status(503).json({ error: 'Add this provider API key in Railway variables' });
-  let agent;
-  if (info.provider === 'local') {
-    const code = typeof req.body.code === 'string' ? req.body.code.trim().toUpperCase() : '';
-    const pass = typeof req.body.devicePassword === 'string' ? req.body.devicePassword : '';
-    agent = agents.get(code);
-    const key = id + ':' + code;
-    const guard = remoteAttempts.get(key) || { count: 0, until: 0 };
-    if (guard.until > Date.now()) return res.status(429).json({ error: 'Too many device password attempts' });
-    let valid = false;
-    if (agent?.ready && pass.length > 0 && pass.length <= 128) valid = crypto.timingSafeEqual(crypto.scryptSync(pass, Buffer.from(agent.salt, 'hex'), 32), Buffer.from(agent.passwordHash, 'hex'));
-    if (!valid) {
-      guard.count++;
-      if (guard.count >= 5) { guard.count = 0; guard.until = Date.now() + 15 * 60_000; }
-      remoteAttempts.set(key, guard);
-      return res.status(401).json({ error: 'Device unavailable or credentials invalid' });
-    }
-    remoteAttempts.delete(key);
-  }
-  if (agent?.aiBusy) return res.status(429).json({ error: 'Local model is busy' });
-  if (agent) agent.aiBusy = true;
+  if (!process.env[info.env]) return res.status(503).json({ error: 'Add this provider API key in Railway variables' });
   aiBusy.add(id);
-  if (info.provider !== 'local') aiUsage.set(id, { day, count: used + 1 });
+  aiUsage.set(id, { day, count: used + 1 });
   try {
-    let answer;
-    if (info.provider !== 'local') answer = await cloudAnswer(req.body.model, entries, image);
-    else {
-      const requestId = crypto.randomUUID();
-      answer = await new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => { aiPending.delete(requestId); reject(new Error('Local model timed out')); }, 120_000);
-        aiPending.set(requestId, { resolve, reject, timeout, agent });
-        try { agent.ws.send(JSON.stringify({ kind: 'ai-request', requestId, model: req.body.model, history: entries, image: image?.base64 || null })); }
-        catch { clearTimeout(timeout); aiPending.delete(requestId); reject(new Error('Device disconnected')); }
-      });
-    }
-    res.json({ answer, usedToday: info.provider === 'local' ? null : used + 1, day });
+    const answer = await cloudAnswer(req.body.model, entries, image);
+    res.json({ answer, usedToday: used + 1, day });
   } catch (error) {
-    if (info.provider !== 'local') aiUsage.set(id, { day, count: used });
+    aiUsage.set(id, { day, count: used });
     res.status(502).json({ error: error.message || 'AI request failed' });
-  } finally { aiBusy.delete(id); if (agent) agent.aiBusy = false; }
+  } finally { aiBusy.delete(id); }
 });
+app.get('/api/host/download', auth, (req, res) => res.download(path.resolve('downloads/S-Power-Host.zip'), 'S-Power-Host.zip'));
+app.post('/api/push/disable', sameOrigin, auth, (req, res) => { subscriptions.delete(req.session.id); res.json({ ok: true }); });
 app.post('/api/push', sameOrigin, auth, (req, res) => {
   if (!vapidReady) return res.status(503).json({ error: 'Push is not configured' });
   const s = req.body.subscription;
@@ -303,22 +278,13 @@ remoteWss.on('connection', (ws, req, session) => {
         return;
       }
       const agent = agents.get(code);
-      if (data.kind === 'ai-result') {
-        const pending = aiPending.get(data.requestId);
-        if (!pending || pending.agent?.ws !== ws) return;
-        aiPending.delete(data.requestId);
-        clearTimeout(pending.timeout);
-        if (typeof data.answer === 'string' && data.answer.length <= 30000) pending.resolve(data.answer);
-        else pending.reject(new Error(typeof data.error === 'string' ? data.error.slice(0, 140) : 'Local model returned no answer'));
-        return;
-      }
       if (!agent || agent.ws !== ws || data.kind !== 'frame' || typeof data.image !== 'string' || data.image.length > 1_700_000 || !/^[a-zA-Z0-9+/=]+$/.test(data.image)) return;
       if (agent.controller?.readyState === 1) send(agent.controller, { kind: 'frame', image: data.image });
     });
     ws.on('close', () => {
       clearTimeout(timeout);
       const agent = agents.get(code);
-      if (agent?.ws === ws) { agent.controller?.close(); agent.controller = null; agent.ws = null; agent.ready = false; for (const [requestId, pending] of aiPending) if (pending.agent === agent) { clearTimeout(pending.timeout); aiPending.delete(requestId); pending.reject(new Error('Device disconnected')); } }
+      if (agent?.ws === ws) { agent.controller?.close(); agent.controller = null; agent.ws = null; agent.ready = false; }
     });
     return;
   }
@@ -326,59 +292,30 @@ remoteWss.on('connection', (ws, req, session) => {
   const claim = ticket && remoteTickets.get(ticket);
   if (ticket) remoteTickets.delete(ticket);
   const agent = claim && agents.get(claim.code);
-  if (!session || !claim || claim.expires < Date.now() || claim.sessionId !== session.id || !agent || agent.controller) { ws.close(); return; }
+  if (!session || !claim || claim.expires < Date.now() || claim.sessionId !== session.id || !agent?.ready || agent.ws?.readyState !== 1 || agent.controller) { ws.close(); return; }
   agent.controller = ws;
+  agent.controllerSession = session.id;
+  const expiry = setTimeout(() => ws.close(), Math.max(0, session.expires - Date.now()));
   send(agent.ws, { kind: 'start' });
   ws.on('message', raw => {
     let data;
     try { data = JSON.parse(raw); } catch { return; }
-    if (agent.controller !== ws || !['move', 'click', 'scroll', 'key'].includes(data.kind)) return;
+    if (agent.controller !== ws || !['move', 'click', 'down', 'up', 'release', 'scroll', 'key'].includes(data.kind)) return;
     if (JSON.stringify(data).length > 512) return;
     send(agent.ws, data);
   });
   ws.on('close', () => {
+    clearTimeout(expiry);
     if (agent.controller === ws) { agent.controller = null; send(agent.ws, { kind: 'stop' }); }
   });
 });
-function send(ws, obj) { if (ws.readyState === 1) ws.send(JSON.stringify(obj)); }
-function notify(to, payload) {
-  if (!vapidReady) return;
-  for (const [id, subscription] of subscriptions) {
-    if (id === payload.fromSession || to && id !== to) continue;
-    webpush.sendNotification(subscription, JSON.stringify({ title: 'S-Power chat', body: `${payload.from}: ${payload.text.slice(0, 100)}` })).catch(() => subscriptions.delete(id));
-  }
-}
-wss.on('connection', (ws, req, session) => {
-  const id = crypto.randomUUID();
-  sockets.set(id, { ws, sessionId: session.id, name: `Guest-${id.slice(0, 4)}` });
-  send(ws, { kind: 'history', items: history });
-  ws.on('message', raw => {
-    let msg;
-    try { msg = JSON.parse(raw); } catch { return; }
-    const actor = sockets.get(id);
-    if (!actor) return;
-    if (msg.kind === 'name' && typeof msg.name === 'string') {
-      const name = msg.name.trim().slice(0, 24);
-      if (!/^[\p{L}\p{N}_ -]{2,24}$/u.test(name) || [...sockets.values()].some(x => x !== actor && x.name.toLowerCase() === name.toLowerCase())) return send(ws, { kind: 'error', text: 'Username unavailable or invalid' });
-      actor.name = name;
-      return send(ws, { kind: 'name', name });
-    }
-    if (msg.kind !== 'message' || typeof msg.text !== 'string') return;
-    const text = msg.text.trim().slice(0, 1000);
-    if (!text) return;
-    const now = Date.now();
-    if (actor.last && now - actor.last < 500) return;
-    actor.last = now;
-    const toName = typeof msg.to === 'string' ? msg.to.trim() : '';
-    const recipient = toName && [...sockets.values()].find(x => x.name.toLowerCase() === toName.toLowerCase());
-    if (toName && !recipient) return send(ws, { kind: 'error', text: 'Recipient is offline' });
-    const item = { kind: 'message', from: actor.name, to: recipient?.name || '', text, at: now };
-    if (!recipient) { history.push(item); if (history.length > 50) history.shift(); }
-    for (const peer of sockets.values()) if (!recipient || peer === recipient || peer === actor) send(peer.ws, item);
-    notify(recipient?.sessionId, { ...item, fromSession: actor.sessionId });
-  });
-  ws.on('close', () => sockets.delete(id));
-});
+function send(ws, obj) { if (ws?.readyState === 1 && ws.bufferedAmount < 2_000_000) ws.send(JSON.stringify(obj)); }
+const chatStore = createChatStore(process.env.DATA_DIR || './data');
+const chat = attachChat(wss, { sessions, store: chatStore, notify: (sessionId, item) => {
+  const subscription = subscriptions.get(sessionId);
+  if (!vapidReady || !subscription) return;
+  webpush.sendNotification(subscription, JSON.stringify({ title: item.toId ? 'Private message' : 'You were mentioned', body: `${item.from}: ${item.sticker ? 'Sticker' : item.text.slice(0, 100)}` })).catch(error => { if ([404, 410].includes(error.statusCode)) subscriptions.delete(sessionId); });
+} });
 setInterval(async () => {
   const now = Date.now();
   if (streamOwner && (!sessions.has(streamOwner) || sessions.get(streamOwner).expires < now)) closeStream();
