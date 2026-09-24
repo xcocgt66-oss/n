@@ -1,6 +1,14 @@
-FROM lscr.io/linuxserver/chromium:latest
+FROM ghcr.io/linuxserver/baseimage-selkies:debiantrixie
+RUN apt-get update && apt-get install -y --no-install-recommends falkon fonts-noto-core fonts-noto-color-emoji && rm -rf /var/lib/apt/lists/*
+COPY root/ /
+RUN chmod +x /defaults/autostart /defaults/autostart_wayland /custom-cont-init.d/50-falkon
+ENV TITLE="S-Power Browser"
+ENV QT_QPA_PLATFORM=xcb
+ENV QTWEBENGINE_CHROMIUM_FLAGS="--disable-dev-shm-usage"
+ENV QTWEBENGINE_DISABLE_SANDBOX=1
+ENV RESTART_APP=true
 ENV SUBFOLDER=/stream/
-ENV CHROME_CLI="--disable-dev-shm-usage https://www.google.com"
+ENV BROWSER_START_URL="https://www.google.com"
 ENV TZ=Asia/Riyadh
 ENV SELKIES_UI_TITLE="S-Power Browser"
 ENV SELKIES_UI_SHOW_LOGO=false
@@ -12,5 +20,4 @@ ENV SELKIES_ENABLE_SHARING="false|locked"
 ENV SELKIES_AUDIO_ENABLED=true
 ENV DISABLE_SUDO=true
 ENV DISABLE_TERMINALS=true
-COPY policy.json /etc/chromium/policies/managed/spower.json
 EXPOSE 3000
