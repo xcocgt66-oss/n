@@ -4,8 +4,12 @@ import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { WebSocket, WebSocketServer } from 'ws';
 import { once } from 'node:events';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 test('stream requires login and lease, proxies WebSockets, strips portal credentials', { timeout: 15000 }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-stream-'));
   let upstreamCookie;
   const upstream = http.createServer((req, res) => { upstreamCookie = req.headers.cookie; res.end('stream-ready'); });
   const upstreamWs = new WebSocketServer({ server: upstream });
@@ -13,7 +17,7 @@ test('stream requires login and lease, proxies WebSockets, strips portal credent
   upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening');
   const probe = http.createServer(); probe.listen(0, '127.0.0.1'); await once(probe, 'listening'); const port = probe.address().port; await new Promise(r => probe.close(r));
   const origin = `http://127.0.0.1:${port}`;
-  const child = spawn(process.execPath, ['server.js'], { cwd: new URL('..', import.meta.url), env: { ...process.env, SPOWER_PASSWORD: 'test-password', PORT: String(port), BROWSER_STREAM_UPSTREAM: `http://127.0.0.1:${upstream.address().port}` }, stdio: 'pipe' });
+  const child = spawn(process.execPath, ['server.js'], { cwd: new URL('..', import.meta.url), env: { ...process.env, SPOWER_PASSWORD: 'test-password', DATA_DIR: directory, PORT: String(port), BROWSER_STREAM_UPSTREAM: `http://127.0.0.1:${upstream.address().port}` }, stdio: 'pipe' });
   let client;
   try {
     for (let i = 0; i < 60; i++) { try { if ((await fetch(origin + '/health')).ok) break; } catch {} await new Promise(r => setTimeout(r, 100)); }
@@ -29,5 +33,5 @@ test('stream requires login and lease, proxies WebSockets, strips portal credent
     const result = once(client, 'message'); client.send('media-frame'); assert.equal((await result)[0].toString(), 'media-frame');
     await fetch(origin + '/api/browser/stop', { method: 'POST', headers, body: '{}' });
     assert.equal((await fetch(origin + '/stream/', { headers })).status, 401);
-  } finally { client?.terminate(); child.kill(); for (const ws of upstreamWs.clients) ws.terminate(); upstreamWs.close(); upstream.closeAllConnections(); await new Promise(r => upstream.close(r)); }
+  } finally { client?.terminate(); child.kill(); for (const ws of upstreamWs.clients) ws.terminate(); upstreamWs.close(); upstream.closeAllConnections(); await new Promise(r => upstream.close(r)); fs.rmSync(directory, { recursive: true, force: true }); }
 });
