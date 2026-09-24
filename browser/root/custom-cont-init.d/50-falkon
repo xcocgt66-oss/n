@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+for directory in /config/.config/labwc /config/.config/openbox; do
+  if [ -f "$directory/autostart" ] && ! [ -f "$directory/.spower-falkon-v1" ]; then
+    cp -p "$directory/autostart" "$directory/autostart.before-falkon"
+    cp /defaults/autostart "$directory/autostart"
+    chmod +x "$directory/autostart"
+    chown abc:abc "$directory/autostart"
+    touch "$directory/.spower-falkon-v1"
+  fi
+done
