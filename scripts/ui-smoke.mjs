@@ -1,0 +1,33 @@
+import { chromium } from 'playwright';
+import {spawn} from 'node:child_process';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+const cwd=fileURLToPath(new URL('..',import.meta.url)),port=Number(process.env.UI_TEST_PORT)||3189,origin=`http://localhost:${port}`;
+const temporary=fs.mkdtempSync(path.join(os.tmpdir(),'sp-ui-'));
+const artifacts=process.env.UI_ARTIFACTS||temporary;fs.mkdirSync(artifacts,{recursive:true});
+const server=spawn(process.execPath,['server.js'],{cwd,env:{...process.env,PORT:String(port),SPOWER_PASSWORD:'test-only-password',DATA_DIR:path.join(temporary,'data'),GEMINI_API_KEY:'',NVIDIA_API_KEY:'',OPENROUTER_API_KEY:'',OPENAI_API_KEY:''},stdio:'pipe'});
+let browser;
+try{
+ for(let i=0;i<80;i++){try{if((await fetch(origin+'/health')).ok)break}catch{}await new Promise(r=>setTimeout(r,100))}
+ browser=await chromium.launch({headless:true,args:['--no-sandbox']});
+ const context=await browser.newContext({viewport:{width:1440,height:1000}}),page=await context.newPage();
+ const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ async function login(p){await p.route('**/api/me',async route=>{const response=await route.fetch(),json=await response.json();json.aiModels=[{id:'gemini/auto',label:'Gemini Auto',provider:'gemini',ready:true,vision:true}];await route.fulfill({json})});await p.goto(origin);assert.equal(await p.title(),'Blank');assert.equal(await p.locator('main').count(),0);await p.keyboard.type('yyyyy');await p.getByPlaceholder('Password',{exact:true}).fill('test-only-password');await p.getByRole('button',{name:'Continue',exact:true}).click();await p.getByPlaceholder('اسأل أو الصق صورة…').waitFor();}
+ await login(page);
+ await page.route('**/api/ai/chat',async route=>{await new Promise(r=>setTimeout(r,1400));await route.fulfill({json:{answer:'**واضح**\n<script>alert(1)</script>\n- First\n- Second\n```js\nconst x = 1;\n```'}})});
+ const draft=page.getByPlaceholder('اسأل أو الصق صورة…');await draft.fill('Explain this');await page.getByRole('button',{name:'Send',exact:true}).click();assert.equal(await draft.inputValue(),'');await page.getByText('Thinking… 1s',{exact:true}).waitFor();await page.locator('.answer-text strong').waitFor();assert.equal(await page.locator('.answer-text strong').innerText(),'واضح');assert.equal(await page.locator('.answer-text script').count(),0);
+ await page.getByRole('button',{name:'New chat',exact:true}).click();await page.getByLabel('Chat history').selectOption({label:'Explain this'});assert.equal(await page.locator('.ai-message').count(),2);
+ await page.reload();await page.keyboard.type('yyyyy');await page.getByPlaceholder('Password',{exact:true}).fill('test-only-password');await page.getByRole('button',{name:'Continue',exact:true}).click();await page.locator('.answer-text strong').waitFor();
+ await page.unroute('**/api/ai/chat');await page.route('**/api/ai/chat',route=>route.fulfill({status:503,json:{error:'Provider unavailable'}}));await draft.fill('Fail me');await page.getByRole('button',{name:'Send',exact:true}).click();await page.getByRole('alert').filter({hasText:'Provider unavailable'}).waitFor();await page.getByRole('button',{name:'Retry',exact:true}).waitFor();await page.getByRole('alert').filter({hasText:'Provider unavailable'}).waitFor({state:'detached',timeout:13000});
+ await page.getByRole('button',{name:'Settings',exact:true}).click();await page.getByRole('textbox',{name:'Username',exact:true}).fill('Alice');await page.getByRole('button',{name:'Save name',exact:true}).click();await page.getByLabel('Theme',{exact:true}).selectOption('light');assert.equal(await page.locator('body').getAttribute('data-theme'),'light');await page.getByLabel('Theme',{exact:true}).selectOption('dark');
+ const context2=await browser.newContext(),page2=await context2.newPage();await login(page2);await page2.getByRole('button',{name:'Settings',exact:true}).click();await page2.getByRole('textbox',{name:'Username',exact:true}).fill('Bob');await page2.getByRole('button',{name:'Save name',exact:true}).click();
+ await page.getByRole('button',{name:'Messages',exact:true}).click();await page2.getByRole('button',{name:'Messages',exact:true}).click();await page.locator('.person').filter({hasText:'Bob'}).getByRole('button',{name:'Message',exact:true}).click();await page.getByRole('textbox',{name:'Message',exact:true}).fill('Private hello');await page.locator('.chat-composer').getByRole('button',{name:'Send',exact:true}).click();await page2.getByRole('tab',{name:/Alice/}).click();await page2.locator('#messages').getByText('Private hello',{exact:true}).waitFor();await page2.getByRole('tab',{name:'Public',exact:true}).click();assert.equal(await page2.locator('#messages').getByText('Private hello',{exact:true}).count(),0);
+ await page.getByRole('button',{name:'Remote Access',exact:true}).click();assert.equal((await page.request.get(origin+'/api/host/download')).status(),200);
+ await page.getByRole('button',{name:'Messages',exact:true}).click();await page.screenshot({path:path.join(artifacts,'messages.png'),fullPage:true});
+ await page.setViewportSize({width:390,height:844});await page.getByRole('button',{name:'Settings',exact:true}).click();await page.screenshot({path:path.join(artifacts,'mobile-settings.png'),fullPage:true});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+ await page.getByRole('button',{name:'AI Studio',exact:true}).click();await page.screenshot({path:path.join(artifacts,'mobile-ai.png'),fullPage:true});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+ assert.deepEqual(errors,[]);console.log('PASS: blank gate, Markdown safety, instant composer clearing, thinking timer, history reload, 10-second errors, settings, private tabs, host download, mobile overflow');
+}finally{await browser?.close();server.kill();fs.rmSync(temporary,{recursive:true,force:true})}
