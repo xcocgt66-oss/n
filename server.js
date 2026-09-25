@@ -1,3 +1,4 @@
+import { installDesktop } from './desktop.js';
 import express from 'express';
 import path from 'node:path';
 import { createChatStore, attachChat } from './chat.js';
@@ -18,10 +19,6 @@ const sessions = new Map();
 const attempts = new Map();
 const subscriptions = new Map();
 const browserTabs = new Map();
-const agents = new Map();
-const remoteTickets = new Map();
-const remoteAttempts = new Map();
-const remoteWss = new WebSocketServer({ noServer: true, maxPayload: 6_000_000 });
 const aiUsage = new Map();
 const aiBusy = new Set();
 const app = express();
@@ -55,6 +52,7 @@ app.use((req, res, next) => {
   if (!streamUpstream) return res.status(503).send('Browser service unavailable');
   streamProxy.web(req, res);
 });
+const desktop = installDesktop(app, { auth, sameOrigin, getSession, directory: process.env.DATA_DIR || './data' });
 app.use('/api/ai/chat', express.json({ limit: '4mb' }));
 app.use(express.json({ limit: '20kb' }));
 
@@ -105,7 +103,7 @@ app.get('/api/me', auth, async (req, res) => { await refreshModels(); res.json({
 app.post('/api/logout', sameOrigin, auth, async (req, res) => {
   if (streamOwner === req.session.id) closeStream();
   chat.disconnect(req.session.id);
-  for (const agent of agents.values()) if (agent.controllerSession === req.session.id) agent.controller?.close();
+  desktop.release(req.session.id);
   sessions.delete(req.session.id);
   subscriptions.delete(req.session.id);
   const tab = browserTabs.get(req.session.id);
@@ -121,29 +119,6 @@ app.post('/api/browser/start', sameOrigin, auth, (req, res) => {
   res.json({ url: '/stream/' });
 });
 app.post('/api/browser/stop', sameOrigin, auth, (req, res) => { if (streamOwner === req.session.id) closeStream(); res.json({ ok: true }); });
-app.post('/api/remote/connect', sameOrigin, auth, (req, res) => {
-  const code = typeof req.body.code === 'string' ? req.body.code.trim().toUpperCase() : '';
-  const candidate = typeof req.body.password === 'string' ? req.body.password : '';
-  const key = req.session.id + ':' + code;
-  const state = remoteAttempts.get(key) || { count: 0, until: 0 };
-  if (state.until > Date.now()) return res.status(429).json({ error: 'Too many attempts' });
-  const agent = agents.get(code);
-  let match = false;
-  if (agent && candidate && candidate.length <= 128) {
-    const hash = crypto.scryptSync(candidate, Buffer.from(agent.salt, 'hex'), 32);
-    match = crypto.timingSafeEqual(hash, Buffer.from(agent.passwordHash, 'hex'));
-  }
-  if (!match || !agent?.ready || agent.controller) {
-    state.count++;
-    if (state.count >= 5) { state.count = 0; state.until = Date.now() + 15 * 60_000; }
-    remoteAttempts.set(key, state);
-    return res.status(401).json({ error: 'Device unavailable or credentials invalid' });
-  }
-  remoteAttempts.delete(key);
-  const ticket = crypto.randomBytes(24).toString('base64url');
-  remoteTickets.set(ticket, { code, sessionId: req.session.id, expires: Date.now() + 30_000 });
-  res.json({ ticket });
-});
 app.post('/api/ai/chat', sameOrigin, auth, async (req, res) => {
   const info = modelInfo(req.body?.model);
   if (!info) return res.status(400).json({ error: 'Unknown AI model' });
@@ -231,6 +206,7 @@ app.post('/api/browser', sameOrigin, auth, async (req, res) => {
 app.get('/health', (req, res) => res.json({ ok: true }));
 app.use(express.static('public', { index: 'index.html' }));
 server.on('upgrade', (req, socket, head) => {
+  if (desktop.upgrade(req, socket, head)) return;
   const origin = req.headers.origin;
   const host = req.headers['x-forwarded-host'] || req.headers.host;
   const session = getSession(req);
@@ -245,71 +221,12 @@ server.on('upgrade', (req, socket, head) => {
     streamProxy.ws(req, socket, head);
     return;
   }
-  if (path === '/agent') {
-    remoteWss.handleUpgrade(req, socket, head, ws => remoteWss.emit('connection', ws, req));
-    return;
-  }
   let validOrigin = false;
   try { validOrigin = !!origin && new URL(origin).host === host; } catch {}
   if (!session || !validOrigin) { socket.destroy(); return; }
-  if (path === '/remote') {
-    remoteWss.handleUpgrade(req, socket, head, ws => remoteWss.emit('connection', ws, req, session));
-    return;
-  }
   if (path !== '/ws') { socket.destroy(); return; }
   wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req, session));
 });
-remoteWss.on('connection', (ws, req, session) => {
-  const url = new URL(req.url, 'http://localhost');
-  if (url.pathname === '/agent') {
-    let code;
-    const timeout = setTimeout(() => ws.close(), 8000);
-    ws.on('message', raw => {
-      let data;
-      try { data = JSON.parse(raw); } catch { ws.close(); return; }
-      if (!code) {
-        if (data.kind !== 'register' || !/^[A-Z0-9]{10}$/.test(data.code) || !/^[a-f0-9]{64}$/.test(data.secret) || !/^[a-f0-9]{32}$/.test(data.salt) || !/^[a-f0-9]{64}$/.test(data.passwordHash)) { ws.close(); return; }
-        const prior = agents.get(data.code);
-        if (prior?.ws?.readyState === 1 || prior && prior.secret !== data.secret || crypto.createHash('sha256').update(Buffer.from(data.secret, 'hex')).digest('hex').slice(0, 10).toUpperCase() !== data.code) { ws.close(); return; }
-        code = data.code;
-        agents.set(code, { ws, secret: data.secret, salt: data.salt, passwordHash: data.passwordHash, ready: true, controller: null });
-        clearTimeout(timeout);
-        send(ws, { kind: 'registered' });
-        return;
-      }
-      const agent = agents.get(code);
-      if (!agent || agent.ws !== ws || data.kind !== 'frame' || typeof data.image !== 'string' || data.image.length > 1_700_000 || !/^[a-zA-Z0-9+/=]+$/.test(data.image)) return;
-      if (agent.controller?.readyState === 1) send(agent.controller, { kind: 'frame', image: data.image });
-    });
-    ws.on('close', () => {
-      clearTimeout(timeout);
-      const agent = agents.get(code);
-      if (agent?.ws === ws) { agent.controller?.close(); agent.controller = null; agent.ws = null; agent.ready = false; }
-    });
-    return;
-  }
-  const ticket = url.searchParams.get('ticket');
-  const claim = ticket && remoteTickets.get(ticket);
-  if (ticket) remoteTickets.delete(ticket);
-  const agent = claim && agents.get(claim.code);
-  if (!session || !claim || claim.expires < Date.now() || claim.sessionId !== session.id || !agent?.ready || agent.ws?.readyState !== 1 || agent.controller) { ws.close(); return; }
-  agent.controller = ws;
-  agent.controllerSession = session.id;
-  const expiry = setTimeout(() => ws.close(), Math.max(0, session.expires - Date.now()));
-  send(agent.ws, { kind: 'start' });
-  ws.on('message', raw => {
-    let data;
-    try { data = JSON.parse(raw); } catch { return; }
-    if (agent.controller !== ws || !['move', 'click', 'down', 'up', 'release', 'scroll', 'key'].includes(data.kind)) return;
-    if (JSON.stringify(data).length > 512) return;
-    send(agent.ws, data);
-  });
-  ws.on('close', () => {
-    clearTimeout(expiry);
-    if (agent.controller === ws) { agent.controller = null; send(agent.ws, { kind: 'stop' }); }
-  });
-});
-function send(ws, obj) { if (ws?.readyState === 1 && ws.bufferedAmount < 2_000_000) ws.send(JSON.stringify(obj)); }
 const chatStore = createChatStore(process.env.DATA_DIR || './data');
 const chat = attachChat(wss, { sessions, store: chatStore, notify: (sessionId, item) => {
   const subscription = subscriptions.get(sessionId);
@@ -322,8 +239,6 @@ setInterval(async () => {
   for (const [id, session] of sessions) if (session.expires < now) { sessions.delete(id); subscriptions.delete(id); }
   for (const [id, tab] of browserTabs) if (!sessions.has(id) || now - tab.last > 15 * 60_000) { browserTabs.delete(id); await tab.context.close().catch(() => {}); }
   for (const [ip, entry] of attempts) if (entry.until < now && !entry.n) attempts.delete(ip);
-  for (const [ticket, claim] of remoteTickets) if (claim.expires < now) remoteTickets.delete(ticket);
-  for (const [key, entry] of remoteAttempts) if (entry.until < now && !entry.count) remoteAttempts.delete(key);
   for (const [id, usage] of aiUsage) if (!sessions.has(id) || usage.day !== new Date().toISOString().slice(0, 10)) aiUsage.delete(id);
 }, 60_000).unref();
 server.listen(Number(process.env.PORT) || 3000, '0.0.0.0');
