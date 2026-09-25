@@ -1,0 +1,19 @@
+S-Power host dependencies are downloaded from their official releases. This source bundle does not include their executable binaries.
+
+Sunshine, LizardByte, GPL-3.0
+https://github.com/LizardByte/Sunshine
+Windows 11 source: https://github.com/LizardByte/Sunshine/tree/v2026.914.233613
+Windows 10 compatibility source: https://github.com/LizardByte/Sunshine/tree/v2025.924.154138
+License: https://github.com/LizardByte/Sunshine/blob/v2025.924.154138/LICENSE
+
+Moonlight Web, MrCreativ3001, unofficial browser client, GPL-3.0
+https://github.com/MrCreativ3001/moonlight-web-stream
+Pinned source: https://github.com/MrCreativ3001/moonlight-web-stream/tree/v2.10.0
+License: https://github.com/MrCreativ3001/moonlight-web-stream/blob/v2.10.0/LICENSE
+This is not the official native Moonlight browser client.
+
+Python: https://www.python.org/psf/license/
+aiohttp: Apache-2.0, https://github.com/aio-libs/aiohttp
+websockets: BSD-3-Clause, https://github.com/python-websockets/websockets
+
+Retain the upstream licenses and notices supplied with downloaded packages. S-Power does not claim authorship of these engines.

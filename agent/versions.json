@@ -1,0 +1,17 @@
+{
+  "moonlight": {
+    "version": "2.10.0",
+    "url": "https://github.com/MrCreativ3001/moonlight-web-stream/releases/download/v2.10.0/moonlight-web-x86_64-pc-windows-gnu.zip",
+    "sha256": "1dc3019952c610fbd7deb76dc84e3c4c6f26458ebb44823ea1f02ad883a36da9"
+  },
+  "sunshine11": {
+    "version": "2026.914.233613",
+    "url": "https://github.com/LizardByte/Sunshine/releases/download/v2026.914.233613/Sunshine-Windows-AMD64-installer.msi",
+    "sha256": "1d7fed8beecd5889dc7ff14cf9f42d6d38f37c3066c13c6c2a5f4e91847e0ccf"
+  },
+  "sunshine10": {
+    "version": "2025.924.154138",
+    "url": "https://github.com/LizardByte/Sunshine/releases/download/v2025.924.154138/Sunshine-Windows-AMD64-installer.exe",
+    "sha256": "51b62bb830fd2a4dd4aeb1caf418876b0a2c1ebf38d33d8a4294521f61516c13"
+  }
+}
