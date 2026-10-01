@@ -45,6 +45,7 @@ export function attachChat(wss, { sessions, store, notify }) {
       if (!valid(peer)) return ws.close(4001, 'Session expired');
       let msg;
       try { msg = JSON.parse(raw); } catch { return; }
+      if (!msg || typeof msg !== 'object') return;
       if (msg.kind === 'name') {
         const name = typeof msg.name === 'string' ? msg.name.trim() : '';
         if (!/^[\p{L}\p{N}_-]{2,24}$/u.test(name) || [...sessions.values()].some(s => s !== identity && s.expires > Date.now() && s.name?.toLowerCase() === name.toLowerCase())) return send(ws, { kind: 'error', text: 'Choose a unique name: 2–24 letters, numbers, _ or -' });

@@ -137,7 +137,11 @@ export function installDesktop(app, { auth, sameOrigin, getSession, directory })
         }
         registry[msg.code] = { secretHash: hash(msg.secret), salt: msg.salt, passwordHash: msg.passwordHash };
         try { save(); } catch { return ws.close(); }
-        const prior = hosts.get(msg.code); prior?.ws.close();
+        const prior = hosts.get(msg.code);
+        if (prior) {
+          for (const [id, lease] of leases) if (lease.code === msg.code) release(id);
+          prior.ws.close();
+        }
         host = { ws, code: msg.code }; hosts.set(msg.code, host); clearTimeout(timeout);
         send(ws, { kind: 'registered' }); return;
       }
