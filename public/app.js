@@ -69,53 +69,41 @@ function startChat(){ws=new ChatTransport();ws.onoffline=()=>{chatState.connecte
 function chatPanel(s){heading(s,'STAY IN THE LOOP','Messages',el('span',{class:'muted',text:'24-hour history'}));const layout=el('div',{class:'chat-layout'}),people=el('aside',{class:'people-list'}),main=el('div',{class:'chat-main'}),tabs=el('div',{class:'chat-tabs',role:'tablist'}),feed=el('div',{id:'messages','aria-live':'polite'}),input=el('textarea',{placeholder:'Write a message…',rows:'2',maxlength:'2000',dir:'auto','aria-label':'Message'}),status=el('span',{class:'muted'}),picker=el('div',{class:'emoji-picker hidden'});['😀','😂','❤️','👍','🎉','🙏','🔥','👀'].forEach(emoji=>picker.append(button(emoji,()=>{input.value+=emoji;input.focus()})));['wave','party','heart','thinking'].forEach(sticker=>picker.append(button(sticker,()=>send(sticker),null,'sticker-choice')));const compose=el('div',{class:'chat-composer'},[input,el('div',{class:'composer-bottom'},[button('Emoji & stickers',()=>picker.classList.toggle('hidden')),status,button('Send',()=>send(),'arrow','primary')]),picker]);main.append(tabs,feed,compose);layout.append(main,people);s.append(layout);let sending=false;async function send(sticker=''){if(sending)return;if(ws?.readyState!==1)return toast('Reconnecting…');if(!input.value.trim()&&!sticker)return;const text=input.value;sending=true;try{await ws.send(JSON.stringify({kind:'message',text,toId:chatState.active==='public'?'':chatState.active,sticker}));if(input.value===text)input.value='';picker.classList.add('hidden')}catch(e){toast(e.message)}finally{sending=false}}input.onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&prefs.enterSend){e.preventDefault();send()}};function activate(id,name){chatState.tabs.set(id,name);chatState.active=id;chatState.unread.delete(id);render();input.focus()}function render(){status.textContent=chatState.connected?'Connected':'Reconnecting…';tabs.replaceChildren();for(const[id,label]of chatState.tabs){const count=chatState.unread.get(id)||0,b=button(label+(count?` · ${count}`:''),()=>activate(id,label),null,id===chatState.active?'active':'');b.setAttribute('role','tab');b.setAttribute('aria-selected',String(id===chatState.active));tabs.append(b)}people.replaceChildren(el('h3',{text:`Online · ${chatState.users.length}`}));for(const user of chatState.users){const row=el('div',{class:'person'},[el('span',{class:'presence-dot'}),user.id===chatState.id?el('strong',{text:user.name+' · you'}):button(user.name,()=>activate(user.id,user.name),null,'person-name')]);if(user.id!==chatState.id)row.append(button('Message',()=>activate(user.id,user.name)),button('@',()=>{activate('public','Public');input.value+=`@${user.name} `;input.focus()}));people.append(row)}feed.replaceChildren();const messages=chatState.items.filter(m=>chatState.active==='public'?!m.toId:m.toId&&(m.fromId===chatState.active||m.toId===chatState.active));if(!messages.length)feed.append(el('div',{class:'chat-empty',text:'Start a conversation'}));for(const m of messages){const line=el('article',{class:`chat-message ${m.fromId===chatState.id?'own':''}`,dir:'auto'},[el('div',{class:'chat-meta'},[el('strong',{text:m.from}),el('time',{text:new Date(m.at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})})])]);if(m.text)line.append(el('p',{text:m.text}));if(['wave','party','heart','thinking'].includes(m.sticker))line.append(el('img',{src:`/stickers/${m.sticker}.svg`,class:'chat-sticker',alt:m.sticker}));feed.append(line)}feed.scrollTop=feed.scrollHeight}chatState.render=render;render()}
 function rdpPanel(s) {
   heading(s, 'YOUR DEVICES', 'Remote Access', el('a', { href: '/api/host/download', class: 'download-button', text: 'Download host app' }));
-  let saved = [];
-  try { saved = JSON.parse(localStorage.getItem('sp_devices_v2') || '[]'); } catch {}
-  const picker = el('select', { 'aria-label': 'Saved devices' });
-  const code = el('input', { placeholder: 'Device ID', autocomplete: 'username', 'aria-label': 'Device ID', maxlength: '800' });
-  const password = el('input', { type: 'password', placeholder: 'Device password', autocomplete: 'current-password', 'aria-label': 'Device password' });
-  code.addEventListener('input', () => {
-    const match = /^SP2\.([A-F0-9]{10})\.([A-Za-z0-9_-]+)$/.exec(code.value.trim());
-    if (!match) return;
-    try {
-      const value = match[2].replace(/-/g, '+').replace(/_/g, '/');
-      const decoded = new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(atob(value), c => c.charCodeAt(0)));
-      if (decoded.length < 12 || decoded.length > 128) return;
-      code.value = match[1]; password.value = decoded;
-    } catch { toast('Invalid connection code'); }
-  });
-  const label = el('input', { placeholder: 'Device name (optional)', 'aria-label': 'Device name' });
+  const code = el('input', { type: 'password', placeholder: 'Paste connection code (SP2...)', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Connection code', maxlength: '800', required: '' });
   const status = el('p', { class: 'status', role: 'status', text: 'Disconnected' });
   const stage = el('div', { class: 'remote-stage' });
   const frame = el('iframe', { class: 'remote-view', title: 'Remote desktop', allow: 'autoplay; fullscreen; clipboard-read; clipboard-write; gamepad', allowfullscreen: '' });
-  const setup = el('details', { class: 'remote-setup' }, [el('summary', { text: 'Connect a new Windows PC' }), el('p', { text: 'Download and extract the host app on your PC. Run Setup.cmd, then Start-Host.cmd. Create a pairing code here and enter it in the host app with this site URL and a new device password.' })]);
+  const setup = el('details', { class: 'remote-setup' }, [el('summary', { text: 'First-time PC setup (only once)' }), el('p', { text: 'Already have a connection code from the host app? Paste it above and connect. This setup section is only for registering a new PC: install the host app, create a pairing code below, then enter it and this site URL in the host app.' })]);
   const pairing = el('input', { readonly: '', type: 'password', 'aria-label': 'Pairing code', placeholder: 'Valid for 10 minutes' });
   setup.append(el('div', { class: 'pairing-row' }, [button('Create pairing code', async () => { try { const r = await api('/api/desktop/enroll', {}); if (r.error) throw Error(r.error); pairing.value = r.token; } catch (e) { toast(e.message); } }), pairing, button('Copy pairing code', async () => { try { if (pairing.value) await navigator.clipboard.writeText(pairing.value); } catch { pairing.type = 'text'; pairing.select(); } })]), el('p', { class: 'muted', text: 'First connection: add 127.0.0.1 in Moonlight, pair its PIN in Sunshine on your PC, then open Desktop. Pairing is saved. Keep the host window open.' }));
-  function refresh() {
-    picker.replaceChildren(el('option', { value: '', text: 'Saved devices' }));
-    saved.forEach(d => picker.append(el('option', { value: d.code, text: d.label || d.code })));
-  }
-  refresh();
-  picker.onchange = () => { const d = saved.find(x => x.code === picker.value); if (d) { code.value = d.code; label.value = d.label; password.focus(); } };
   let connected = false;
-  const connect = button('Connect', async () => {
+  const connect = button('Connect', null, null, 'primary');
+  async function connectHost() {
     connect.disabled = true; status.textContent = 'Connecting…';
     try {
-      const id = code.value.trim().toUpperCase();
-      const r = await api('/api/desktop/connect', { code: id, password: password.value });
-      password.value = '';
+      const match = /^SP2\.([A-F0-9]{10})\.([A-Za-z0-9_-]+)$/.exec(code.value.trim());
+      if (!match) throw Error('Copy the full connection code using Copy connection code in the host app.');
+      let password;
+      try {
+        const value = match[2].replace(/-/g, '+').replace(/_/g, '/');
+        password = new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(atob(value), c => c.charCodeAt(0)));
+        if (password.length < 12 || password.length > 128) throw Error();
+      } catch { throw Error('Invalid connection code. Copy it again from the host app.'); }
+      const r = await api('/api/desktop/connect', { code: match[1], password });
       if (!r.url) throw Error(r.error || 'Connection failed');
       frame.src = r.url; stage.replaceChildren(frame); connected = true; status.textContent = 'Host connected';
-      saved = [{ code: id, label: label.value.trim().slice(0, 60) || id }, ...saved.filter(x => x.code !== id)].slice(0, 20);
-      localStorage.setItem('sp_devices_v2', JSON.stringify(saved)); refresh(); setup.open = false;
-    } catch (e) { status.textContent = 'Connection failed'; toast(e.message); }
+      code.value = ''; setup.open = false;
+    } catch (e) { status.textContent = e.message || 'Connection failed. Please retry.'; }
     finally { connect.disabled = false; }
-  }, null, 'primary');
+  }
   async function disconnect() {
     connected = false; frame.removeAttribute('src'); stage.replaceChildren(); status.textContent = 'Disconnected';
     try { await api('/api/desktop/disconnect', {}); } catch {}
   }
-  s.append(setup, el('div', { class: 'remote-form' }, [picker, code, password, label, connect, button('Forget device', () => { saved = saved.filter(x => x.code !== code.value.trim().toUpperCase()); localStorage.setItem('sp_devices_v2', JSON.stringify(saved)); refresh(); })]), el('div', { class: 'remote-toolbar' }, [status, button('Full screen', () => stage.requestFullscreen?.().catch(() => toast('Full screen unavailable')), 'full'), button('Disconnect', disconnect)]), stage);
+  const form = el('form', { class: 'remote-form' }, [code, connect]);
+  connect.type = 'submit'; connect.onclick = null;
+  form.onsubmit = async e => { e.preventDefault(); if (!connect.disabled) await connectHost(); };
+  s.append(el('p', { class: 'muted', text: 'Copy the connection code from S-Power Host, paste it here, then connect. Keep the host app running on your PC.' }), form, setup, el('div', { class: 'remote-toolbar' }, [status, button('Full screen', () => stage.requestFullscreen?.().catch(() => toast('Full screen unavailable')), 'full'), button('Disconnect', disconnect)]), stage);
   window.addEventListener('pagehide', () => { if (connected) navigator.sendBeacon('/api/desktop/disconnect', new Blob(['{}'], { type: 'application/json' })); });
   const poll = setInterval(async () => {
     if (!s.isConnected) { clearInterval(poll); return; }
