@@ -1,4 +1,4 @@
-# S-Power 1.5.0
+# S-Power 1.5.1
 
 Railway portal with the existing AI studio, session-based messages and a visible Windows desktop host. The Browser feature and its server-side engines were removed at the owner's request. UI styles, the login gesture/password flow, and AI provider code are unchanged.
 
@@ -8,7 +8,7 @@ Use one replica and a persistent Railway volume: `DATA_DIR=/data`. Sessions stay
 
 Chat uses short authenticated same-origin HTTPS POST requests, polling every 1.5 seconds. It does not need WebSocket, SSE, UDP, third-party assets or external browser API calls. Unacknowledged events replay, retries use receipt IDs, and failed sends preserve the draft. Inactive tabs expire after 90 seconds and reconnect with history. Up to eight active chat tabs per login. The legacy authenticated /ws transport remains compatible.
 
-Remote Access runs Sunshine capture/encoding and Moonlight Web on the Windows PC. Railway forwards authenticated requests; relayed media still consumes network traffic and bounded buffers. downloads/S-Power-Host.zip includes a built Windows x64 EXE with Python/Tkinter bundled, source, installer helpers and notices. Sunshine/Moonlight are separately installed using Setup.cmd. Read REMOTE-AR.md. The EXE is unsigned. Paste the private SP2 connection code in Device ID to populate the existing credentials fields. No remote-access connection code is saved in browser storage.
+Remote Access runs Sunshine capture/encoding and Moonlight Web on the Windows PC. Railway forwards authenticated requests; relayed media still consumes network traffic and bounded buffers. downloads/S-Power-Host.zip includes a built Windows x64 EXE with Python/Tkinter bundled, source, installer helpers and notices. Sunshine/Moonlight are separately installed using Setup.cmd. Read REMOTE-AR.md. The EXE is unsigned. Remote Access has one Connection code field and a Connect button. Paste the full private SP2 code; credentials are decoded internally. First-time registration is in a collapsed setup section. No remote-access connection code is saved in browser storage.
 
 A site's domain or remote-control protocols can still be blocked by a managed network. Chat's HTTPS transport does not override company policy. Remote Access still requires allowed WSS and WebRTC or the engine's WebSocket media transport. No public proxy or firewall bypass is included.
 
