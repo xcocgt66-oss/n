@@ -25,7 +25,7 @@ try {
   page.on('console',m=>{if(m.type()==='error' && /Content Security Policy|Refused to/.test(m.text()))errors.push(m.text());});
   await page.goto(origin); await page.keyboard.type('yyyyy'); await page.getByPlaceholder('Password',{exact:true}).fill('test-only-password'); await page.getByRole('button',{name:'Continue',exact:true}).click();
   await page.getByRole('button',{name:'Remote Access',exact:true}).click();
-  await page.getByText('Connect a new Windows PC',{exact:true}).click();
+  await page.getByText('First-time PC setup (only once)',{exact:true}).click();
   await page.getByRole('button',{name:'Create pairing code',exact:true}).click();
   await page.waitForFunction(()=>document.querySelector('[aria-label="Pairing code"]').value.length>20);
   const enrollment=await page.getByLabel('Pairing code',{exact:true}).inputValue();
@@ -33,7 +33,7 @@ try {
   const registered = new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Host registration timeout')),10000);host.stdout.on('data',data=>{if(data.toString().includes('REGISTERED')){clearTimeout(timer);resolve();}});host.on('exit',code=>{clearTimeout(timer);reject(Error('Host exited '+code));});});
   host.stdin.write(JSON.stringify({portal:origin.replace('http:','https:'),code,secret,salt,passwordHash:crypto.scryptSync(password,Buffer.from(salt,'hex'),32).toString('hex'),enrollment})+'\n');
   await registered;
-  await page.getByLabel('Device ID',{exact:true}).fill(code);await page.getByLabel('Device password',{exact:true}).fill(password);
+  await page.getByLabel('Connection code',{exact:true}).fill('SP2.'+code+'.'+Buffer.from(password).toString('base64url'));
   const authenticated=page.waitForResponse(r=>r.url().includes(`/desktop/${code}/api/authenticate`) && r.status()===200);
   await page.getByRole('button',{name:'Connect',exact:true}).click();
   await authenticated;
@@ -41,7 +41,7 @@ try {
   await frame.locator('.host-add').waitFor();
   await frame.locator('.open-settings').click();
   await frame.locator('body').getByText('Bitrate', {exact: false}).first().waitFor();
-  assert.equal(await page.getByLabel('Device password',{exact:true}).inputValue(),'');
+  assert.equal(await page.getByLabel('Connection code',{exact:true}).inputValue(),'');
   await page.waitForTimeout(800);
   console.log('Moonlight UI:',(await frame.locator('body').innerText()).replace(/\s+/g,' ').slice(0,260));
   assert.deepEqual(errors,[]);
