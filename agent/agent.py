@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -7,6 +8,7 @@ import queue
 import secrets
 import socket
 import subprocess
+import sys
 import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -15,7 +17,7 @@ import webbrowser
 from bridge import Bridge
 from windows_job import ProcessJob
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(sys.executable if getattr(sys, 'frozen', False) else __file__).resolve().parent
 CONFIG = ROOT / 'host-config.json'
 
 
@@ -90,18 +92,19 @@ class App:
         self.stop_requested = threading.Event()
         self.config = json.loads(CONFIG.read_text('utf-8')) if CONFIG.exists() else {}
         window.title('S-Power Host')
-        window.geometry('620x540')
-        window.minsize(550, 500)
+        window.geometry('620x620')
+        window.minsize(550, 600)
         frame = ttk.Frame(window, padding=24)
         frame.pack(fill='both', expand=True)
         ttk.Label(frame, text='S-Power Host', font=('Segoe UI', 22, 'bold')).pack(anchor='w', pady=(0, 12))
         ttk.Label(frame, text='Visible host connection. Stop access disconnects all controllers.').pack(anchor='w')
         self.portal = self.field(frame, 'Portal URL', self.config.get('portal', 'https://'))
         self.enrollment = self.field(frame, 'Pairing code from Remote Access (first setup)', '', True)
-        self.password = self.field(frame, 'New device password (12+ characters, first setup)', '', True)
+        self.password = self.field(frame, 'Device password (blank on first setup = generate securely)', '', True)
         self.code = tk.StringVar(value=self.config.get('code', 'Created on first start'))
-        ttk.Label(frame, text='Device ID').pack(anchor='w', pady=(14, 2))
+        ttk.Label(frame, text='Connection code / Device ID').pack(anchor='w', pady=(14, 2))
         ttk.Entry(frame, textvariable=self.code, state='readonly').pack(fill='x')
+        ttk.Button(frame, text='Copy connection code', command=self.copy_code).pack(anchor='w', pady=4)
         buttons = ttk.Frame(frame)
         buttons.pack(fill='x', pady=18)
         self.start_button = ttk.Button(buttons, text='Start access', command=self.start)
@@ -109,6 +112,7 @@ class App:
         self.stop_button = ttk.Button(buttons, text='Stop access', command=self.stop)
         self.stop_button.pack(side='left', padx=8)
         ttk.Button(buttons, text='Sunshine settings', command=lambda: webbrowser.open('https://localhost:47990')).pack(side='left')
+        ttk.Button(buttons, text='Install engines', command=self.setup).pack(side='left', padx=8)
         self.status = tk.StringVar(value='Ready. Install Sunshine as a Windows service before connecting.')
         ttk.Label(frame, textvariable=self.status, wraplength=550).pack(anchor='w')
         ttk.Label(frame, text='Device password is not saved. Device identity and engine pairing are saved.\nKeep this window open while using remote access.', wraplength=550).pack(anchor='w', pady=14)
@@ -126,14 +130,28 @@ class App:
         temp.write_text(json.dumps({k: v for k, v in self.config.items() if k != 'enrollment'}, indent=2), 'utf-8')
         os.replace(temp, CONFIG)
 
+    def setup(self):
+        # Explicit visible setup; the official installer asks for elevation itself.
+        subprocess.Popen(['cmd.exe', '/c', str(ROOT / 'Setup.cmd')], cwd=ROOT,
+                         creationflags=subprocess.CREATE_NEW_CONSOLE)
+
+    def copy_code(self):
+        if self.code.get().startswith('SP2.'):
+            self.window.clipboard_clear()
+            self.window.clipboard_append(self.code.get())
+            self.status.set('Connection code copied. Keep it private; it grants device access.')
+        else:
+            messagebox.showinfo('Connection code', 'Enter the existing device password and start access to copy a connection code. You can also use Device ID and password separately.')
+
     def start(self):
         if self.thread and self.thread.is_alive():
             return
         if not (ROOT / 'vendor' / 'moonlight' / 'web-server.exe').exists():
             messagebox.showerror('Setup required', 'Run Setup.cmd before Start-Host.cmd.')
             return
+        password = self.password.get()
         if not self.config:
-            password = self.password.get()
+            password = password or secrets.token_urlsafe(24)
             if len(password) < 12 or len(password) > 128 or not self.enrollment.get().strip():
                 messagebox.showerror('First setup', 'Enter a fresh pairing code and a device password of 12–128 characters.')
                 return
@@ -142,7 +160,15 @@ class App:
         self.config['portal'] = self.portal.get().strip().rstrip('/')
         self.config['enrollment'] = self.enrollment.get().strip()
         self.save()
-        self.code.set(self.config['code'])
+        if password:
+            actual = hashlib.scrypt(password.encode(), salt=bytes.fromhex(self.config['salt']), n=16384, r=8, p=1, dklen=32).hex()
+            if not secrets.compare_digest(actual, self.config['passwordHash']):
+                messagebox.showerror('Device password', 'Use the original device password. It has not been changed.')
+                return
+            encoded = base64.urlsafe_b64encode(password.encode()).decode().rstrip('=')
+            self.code.set('SP2.' + self.config['code'] + '.' + encoded)
+        elif not self.code.get().startswith('SP2.'):
+            self.code.set(self.config['code'])
         self.password.set('')
         self.enrollment.set('')
         self.start_button.config(state='disabled')
@@ -199,6 +225,15 @@ class App:
 if __name__ == '__main__':
     if os.name != 'nt':
         raise SystemExit('S-Power Host requires Windows 10/11 x64')
+    if '--self-test' in sys.argv:
+        import ssl
+        import aiohttp
+        import websockets
+        window = tk.Tk()
+        window.withdraw()
+        window.update()
+        window.destroy()
+        raise SystemExit(0)
     window = tk.Tk()
     App(window)
     window.mainloop()

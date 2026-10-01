@@ -1,4 +1,4 @@
-S-Power host dependencies are downloaded from their official releases. This source bundle does not include their executable binaries.
+S-Power host dependencies are downloaded from their official releases. This bundle does not include the Sunshine or Moonlight engine binaries. S-Power-Host.exe includes Python, Tk/Tcl and Python dependencies; their license files are included in licenses/.
 
 Sunshine, LizardByte, GPL-3.0
 https://github.com/LizardByte/Sunshine

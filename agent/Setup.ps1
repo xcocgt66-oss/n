@@ -24,7 +24,10 @@ if (-not (Test-Path $moonlightExe)) {
     if ($found.Count -ne 1) { throw 'Unexpected Moonlight archive layout.' }
     New-Item -ItemType Directory -Force 'vendor\moonlight' | Out-Null
     Copy-Item (Join-Path $found[0].Directory.FullName '*') 'vendor\moonlight' -Recurse -Force
-    Remove-Item $unpackDir -Recurse -Force
+    $resolvedUnpack = [IO.Path]::GetFullPath($unpackDir)
+    $cacheRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'installer-cache')) + [IO.Path]::DirectorySeparatorChar
+    if (-not $resolvedUnpack.StartsWith($cacheRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unexpected extraction directory.' }
+    Remove-Item -LiteralPath $resolvedUnpack -Recurse -Force
 }
 $service = Get-Service -Name 'SunshineService' -ErrorAction SilentlyContinue
 $existing = Test-Path (Join-Path $env:ProgramFiles 'Sunshine\sunshine.exe')
