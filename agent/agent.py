@@ -228,7 +228,6 @@ if __name__ == '__main__':
     if '--self-test' in sys.argv:
         import ssl
         import aiohttp
-        import websockets
         window = tk.Tk()
         window.withdraw()
         window.update()
