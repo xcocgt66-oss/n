@@ -1,11 +1,20 @@
 import { installDesktop } from './desktop.js';
+import { installYouTube } from './youtube.js';
 import express from 'express';
 import path from 'node:path';
+import fs from 'node:fs';
+import { EventEmitter } from 'node:events';
 import { createChatStore, attachChat } from './chat.js';
 import { installChatHttp } from './chat-http.js';
 import http from 'node:http';
 import crypto from 'node:crypto';
 import webpush from 'web-push';
+import { createBareServer } from '@tomphttp/bare-server-node';
+
+const pkgDist = name => path.resolve('node_modules', name, 'dist');
+const uvPath = pkgDist('@titaniumnetwork-dev/ultraviolet');
+const baremuxPath = pkgDist('@mercuryworkshop/bare-mux');
+const baremodPath = pkgDist('@mercuryworkshop/bare-as-module3');
 
 const password = process.env.SPOWER_PASSWORD;
 if (!password) throw new Error('Missing SPOWER_PASSWORD: add it in Railway service Variables and deploy the staged change');
@@ -13,7 +22,37 @@ const sessions = new Map();
 const attempts = new Map();
 const subscriptions = new Map();
 const app = express();
-const server = http.createServer(app);
+const dataDir = process.env.DATA_DIR || './data';
+
+// Web proxy engine: every page the Browser tab opens is fetched by THIS server (its IP),
+// over plain HTTPS requests to /bare/. Only signed-in sessions may use it.
+const bare = createBareServer('/bare/', {
+  logErrors: process.env.PROXY_DEBUG === '1',
+  blockLocal: process.env.PROXY_ALLOW_LOCAL !== '1',
+  connectionLimiter: { maxConnectionsPerIP: 100000, windowDuration: 60, blockDuration: 1 },
+});
+// The proxy transport sends requests without cookies, so it authenticates with a per-session
+// token in the path: /bare/<token>/v3/...  (token is issued by /api/me after sign-in)
+function bareAuth(req) {
+  const m = /^\/bare\/([A-Za-z0-9_-]{32,64})(\/.*)$/.exec(req.url || '');
+  if (m) {
+    for (const s of sessions.values()) if (s.proxyToken === m[1] && s.expires > Date.now()) { req.url = '/bare' + m[2]; return true; }
+    return false;
+  }
+  return !!getSession(req);
+}
+const server = http.createServer((req, res) => {
+  if ((req.url || '').startsWith('/bare/')) {
+    if (!bareAuth(req) || !bare.shouldRoute(req)) { res.writeHead(401, { 'Content-Type': 'application/json' }); return res.end('{"error":"Sign in required"}'); }
+    return bare.routeRequest(req, res);
+  }
+  app(req, res);
+});
+// Optional: websites that use WebSockets themselves (only works where WS isn't blocked; normal browsing doesn't need it)
+server.on('upgrade', (req, socket, head) => {
+  if ((req.url || '').startsWith('/bare/') && bareAuth(req) && bare.shouldRoute(req)) return bare.routeUpgrade(req, socket, head);
+  socket.destroy();
+});
 const vapidReady = !!(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY && process.env.VAPID_SUBJECT);
 if (vapidReady) webpush.setVapidDetails(process.env.VAPID_SUBJECT, process.env.VAPID_PUBLIC_KEY, process.env.VAPID_PRIVATE_KEY);
 app.disable('x-powered-by');
@@ -21,10 +60,28 @@ app.use((req, res, next) => {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; frame-src 'self' https://www.youtube-nocookie.com https://www.youtube.com; object-src 'none'; base-uri 'none'; form-action 'self'");
+  // Proxy engine files run rewritten third-party code, so they cannot carry the app's strict CSP
+  const proxyAsset = /^\/(uv\/|baremux\/|baremod\/|sw\.js|sp-shared)/.test(req.path);
+  if (!proxyAsset) res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob:; connect-src 'self'; frame-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'");
   next();
 });
-const desktop = installDesktop(app, { auth, sameOrigin, getSession, directory: process.env.DATA_DIR || './data' });
+
+// ---- Proxy engine static files ----
+const uvBundle = fs.readFileSync(path.resolve('public/sp-shared.js'), 'utf8') + '\n' + fs.readFileSync(path.join(uvPath, 'uv.bundle.js'), 'utf8');
+app.get('/uv/uv.bundle.js', (req, res) => { res.type('application/javascript').send(uvBundle); });
+app.get('/uv/uv.config.js', (req, res) => res.sendFile(path.resolve('public/uv/uv.config.js')));
+app.use('/uv/', express.static(uvPath, { index: false }));
+app.use('/baremux/', express.static(baremuxPath, { index: false }));
+app.use('/baremod/', express.static(baremodPath, { index: false }));
+// If the service worker is not controlling the frame yet (first visit / hard reload), load it and retry once
+app.get('/uv/service/*', (req, res) => {
+  res.type('html').send(`<!doctype html><meta charset="utf-8"><body style="background:#101214;color:#aaa;font-family:sans-serif;display:grid;place-items:center;height:90vh">Starting browser engine…<script>
+  (async()=>{try{await navigator.serviceWorker.register('/sw.js',{scope:'/'});await navigator.serviceWorker.ready;}catch(e){}
+  const k='sp_sw_retry',t=+sessionStorage.getItem(k)||0;if(Date.now()-t>15000){sessionStorage.setItem(k,Date.now());location.reload();}else{document.body.textContent='Browser engine failed to start. Reload the app and try again.';}})();
+  </script>`);
+});
+
+const desktop = installDesktop(app, { auth, sameOrigin, getSession, directory: dataDir });
 app.use(express.json({ limit: '20kb' }));
 
 function token(req) {
@@ -67,7 +124,7 @@ app.post('/api/login', sameOrigin, (req, res) => {
   const existing = getSession(req);
   if (existing) { setCookie(res, existing.id); return res.json({ ok: true }); }
   const id = crypto.randomBytes(32).toString('base64url');
-  sessions.set(id, { expires: Date.now() + 8 * 60 * 60_000, chatId: crypto.randomUUID() });
+  sessions.set(id, { expires: Date.now() + 8 * 60 * 60_000, chatId: crypto.randomUUID(), proxyToken: crypto.randomBytes(24).toString('base64url') });
   setCookie(res, id);
   res.json({ ok: true });
 });
@@ -76,6 +133,7 @@ app.get('/api/me', auth, (req, res) => {
   res.json({
     ok: true,
     sessionTag: req.session.chatId,
+    proxyToken: req.session.proxyToken,
     vapid: vapidReady ? process.env.VAPID_PUBLIC_KEY : null,
   });
 });
@@ -90,173 +148,10 @@ app.post('/api/logout', sameOrigin, auth, async (req, res) => {
 });
 
 // ======================================================
-// YOUTUBE SEARCH via Piped API (free, no API key)
-// ======================================================
-const PIPED_INSTANCES = [
-  'https://pipedapi.kavin.rocks',
-  'https://pipedapi.adminforge.de',
-  'https://pipedapi.in.projectsegfau.lt',
-];
-let pipedIndex = 0;
-
-app.get('/api/youtube/search', auth, async (req, res) => {
-  const query = String(req.query.q || '').trim();
-  if (!query) return res.status(400).json({ error: 'Search query required' });
-  const errors = [];
-  for (let i = 0; i < PIPED_INSTANCES.length; i++) {
-    const instance = PIPED_INSTANCES[(pipedIndex + i) % PIPED_INSTANCES.length];
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 12000);
-      const r = await fetch(`${instance}/search?q=${encodeURIComponent(query)}&filter=videos`, {
-        signal: controller.signal,
-        headers: { 'Accept': 'application/json' },
-      });
-      clearTimeout(timer);
-      if (!r.ok) { errors.push(`${instance}: ${r.status}`); continue; }
-      const data = await r.json();
-      pipedIndex = (pipedIndex + i) % PIPED_INSTANCES.length;
-      const items = (data.items || []).filter(v => v.type === 'stream').slice(0, 20).map(v => ({
-        id: (v.url || '').replace('/watch?v=', ''),
-        title: v.title || '',
-        thumbnail: v.thumbnail || '',
-        duration: v.duration || 0,
-        uploaderName: v.uploaderName || '',
-        views: v.views || 0,
-        uploaded: v.uploaded || 0,
-      }));
-      return res.json({ items });
-    } catch (e) { errors.push(`${instance}: ${e.message}`); }
-  }
-  res.status(502).json({ error: 'YouTube search unavailable', details: errors });
-});
-
-app.get('/api/youtube/trending', auth, async (req, res) => {
-  const errors = [];
-  for (let i = 0; i < PIPED_INSTANCES.length; i++) {
-    const instance = PIPED_INSTANCES[(pipedIndex + i) % PIPED_INSTANCES.length];
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 12000);
-      const r = await fetch(`${instance}/trending?region=${req.query.region || 'US'}`, {
-        signal: controller.signal,
-        headers: { 'Accept': 'application/json' },
-      });
-      clearTimeout(timer);
-      if (!r.ok) continue;
-      const data = await r.json();
-      pipedIndex = (pipedIndex + i) % PIPED_INSTANCES.length;
-      const items = (data || []).slice(0, 20).map(v => ({
-        id: (v.url || '').replace('/watch?v=', ''),
-        title: v.title || '',
-        thumbnail: v.thumbnail || '',
-        duration: v.duration || 0,
-        uploaderName: v.uploaderName || '',
-        views: v.views || 0,
-        uploaded: v.uploaded || 0,
-      }));
-      return res.json({ items });
-    } catch (e) { errors.push(`${instance}: ${e.message}`); }
-  }
-  res.status(502).json({ error: 'Trending unavailable' });
-});
-
-// ======================================================
-// LIGHTWEIGHT BROWSER PROXY
-// ======================================================
-const PROXY_MAX_SIZE = 4 * 1024 * 1024; // 4MB max page size
-const BLOCKED_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '[::]', '[::1]']);
-
-app.get('/api/browse', auth, async (req, res) => {
-  const target = String(req.query.url || '').trim();
-  if (!target) return res.status(400).json({ error: 'URL required' });
-  let parsed;
-  try {
-    parsed = new URL(target);
-    if (!['http:', 'https:'].includes(parsed.protocol)) throw Error();
-    if (BLOCKED_HOSTS.has(parsed.hostname)) throw Error();
-  } catch { return res.status(400).json({ error: 'Invalid URL' }); }
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
-    const r = await fetch(target, {
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
-      },
-      redirect: 'follow',
-    });
-    clearTimeout(timer);
-    const contentType = r.headers.get('content-type') || '';
-    if (!contentType.includes('text/html') && !contentType.includes('application/xhtml')) {
-      return res.status(415).json({ error: 'Not an HTML page' });
-    }
-    const html = await r.text();
-    if (html.length > PROXY_MAX_SIZE) return res.status(413).json({ error: 'Page too large' });
-
-    // Rewrite relative URLs to absolute and inject base tag
-    const base = `${parsed.protocol}//${parsed.host}`;
-    const injectedHtml = html
-      .replace(/<head([^>]*)>/i, `<head$1><base href="${base}/" target="_self">`)
-      .replace(/<script[\s\S]*?<\/script>/gi, '') // Remove scripts for safety
-      .replace(/on\w+="[^"]*"/gi, ''); // Remove inline event handlers
-
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Content-Security-Policy', "default-src * 'unsafe-inline'; script-src 'none'; frame-src 'none'");
-    res.send(injectedHtml);
-  } catch (e) {
-    res.status(502).json({ error: e.name === 'AbortError' ? 'Page load timed out' : `Failed to load: ${e.message}` });
-  }
-});
-
-// Google search proxy
-app.get('/api/search', auth, async (req, res) => {
-  const query = String(req.query.q || '').trim();
-  if (!query) return res.status(400).json({ error: 'Search query required' });
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 12000);
-    const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-    const r = await fetch(searchUrl, {
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-        'Accept': 'text/html',
-      },
-    });
-    clearTimeout(timer);
-    const html = await r.text();
-    // Parse DuckDuckGo HTML results
-    const results = [];
-    const regex = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
-    let match;
-    while ((match = regex.exec(html)) !== null && results.length < 15) {
-      const url = decodeURIComponent(match[1].replace(/.*uddg=/, '').replace(/&.*/, ''));
-      const title = match[2].replace(/<[^>]+>/g, '').trim();
-      const snippet = match[3].replace(/<[^>]+>/g, '').trim();
-      if (url.startsWith('http') && title) results.push({ url, title, snippet });
-    }
-    // Fallback: simpler parsing
-    if (!results.length) {
-      const linkRegex = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
-      while ((match = linkRegex.exec(html)) !== null && results.length < 15) {
-        let url = match[1];
-        try { url = decodeURIComponent(url.replace(/.*uddg=/, '').replace(/&.*/, '')); } catch {}
-        const title = match[2].replace(/<[^>]+>/g, '').trim();
-        if (url.startsWith('http') && title) results.push({ url, title, snippet: '' });
-      }
-    }
-    res.json({ results });
-  } catch (e) {
-    res.status(502).json({ error: 'Search failed' });
-  }
-});
-
-// ======================================================
 // PUSH NOTIFICATIONS
 // ======================================================
+installYouTube(app, { auth, directory: dataDir });
+
 app.get('/api/host/download', auth, (req, res) => res.download(path.resolve('downloads/S-Power-Host.zip'), 'S-Power-Host.zip'));
 app.post('/api/push/disable', sameOrigin, auth, (req, res) => { subscriptions.delete(req.session.id); res.json({ ok: true }); });
 app.post('/api/push', sameOrigin, auth, (req, res) => {
@@ -273,14 +168,13 @@ app.use(express.static('public', { index: 'index.html' }));
 // CHAT (HTTP-only, no WebSocket upgrade)
 // ======================================================
 // Internal EventEmitter-based chat hub (no external WebSocket)
-import { EventEmitter } from 'node:events';
 class InternalHub extends EventEmitter {
   constructor() { super(); this.clients = new Set(); }
   // Mimics WSS enough for chat.js attachChat
   handleUpgrade() {}
 }
 const chatHub = new InternalHub();
-const chatStore = createChatStore(process.env.DATA_DIR || './data');
+const chatStore = createChatStore(dataDir);
 const chat = attachChat(chatHub, { sessions, store: chatStore, notify: (sessionId, item) => {
   const subscription = subscriptions.get(sessionId);
   if (!vapidReady || !subscription) return;
