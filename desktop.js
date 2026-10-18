@@ -1,97 +1,274 @@
+// Desktop remote access module — HTTPS only (SSE + HTTP POST)
+// Host connects via SSE (EventSource) for receiving commands
+// and sends data back via HTTP POST. No WebSocket needed.
+
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import express from 'express';
 import { promisify } from 'node:util';
-import { WebSocketServer } from 'ws';
 
-const scrypt = promisify(crypto.scrypt);
+const scryptAsync = promisify(crypto.scrypt);
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 const safeEqual = (a, b) => typeof a === 'string' && typeof b === 'string' && a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
 const validCode = code => typeof code === 'string' && /^[A-F0-9]{10}$/.test(code);
-const packet = (kind, id, payload) => Buffer.concat([Buffer.from([kind]), Buffer.from(id.replaceAll('-', ''), 'hex'), Buffer.from(payload)]);
-const uuid = bytes => { const h = bytes.toString('hex'); return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`; };
-const MAX_BUFFER = 8 * 1024 * 1024;
 
 export function installDesktop(app, { auth, sameOrigin, getSession, directory }) {
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const registryFile = path.join(directory, 'devices.json');
   let registry = {};
   try { registry = JSON.parse(fs.readFileSync(registryFile, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-  const hosts = new Map(), enrollments = new Map(), leases = new Map(), channels = new Map(), attempts = new Map();
-  const hostWss = new WebSocketServer({ noServer: true, maxPayload: MAX_BUFFER, perMessageDeflate: false });
-  const viewerWss = new WebSocketServer({ noServer: true, maxPayload: MAX_BUFFER, perMessageDeflate: false });
   function save() { fs.writeFileSync(registryFile + '.tmp', JSON.stringify(registry), { mode: 0o600 }); fs.renameSync(registryFile + '.tmp', registryFile); }
-  function send(ws, data, binary = false) {
-    if (ws?.readyState !== 1) return false;
-    if (ws.bufferedAmount > MAX_BUFFER) { ws.close(1013, 'Connection too slow'); return false; }
-    ws.send(binary === true || binary === null ? data : JSON.stringify(data), { binary: binary === true }); return true;
+
+  const hosts = new Map();       // code -> host object
+  const enrollments = new Map();  // token -> { expires, sessionId }
+  const leases = new Map();       // sessionId -> { code, expires }
+  const pending = new Map();      // requestId -> { resolve, reject, timer, res?, headers?, chunks? }
+  const attempts = new Map();     // key -> { count, until }
+
+  function sendSSE(host, event, data) {
+    if (!host || !host.res || host.res.writableEnded) return false;
+    try {
+      host.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      return true;
+    } catch { return false; }
   }
-  function finish(id, notify = true) {
-    const channel = channels.get(id); if (!channel) return;
-    channels.delete(id); clearTimeout(channel.timeout);
-    if (notify) send(channel.host.ws, { kind: 'close', id });
-    if (channel.res && !channel.res.writableEnded) { if (!channel.res.headersSent) channel.res.statusCode = 502; channel.res.end(); }
-    channel.ws?.close();
-    channel.reject?.(new Error('Host did not accept the session'));
-    if (channel.stream) release(channel.sessionId);
-  }
-  function release(sessionId) {
-    const lease = leases.get(sessionId); if (!lease) return;
+
+  function releaseSession(sessionId) {
+    const lease = leases.get(sessionId);
+    if (!lease) return;
     leases.delete(sessionId);
-    for (const [id, c] of channels) if (c.sessionId === sessionId) finish(id);
-    send(hosts.get(lease.code)?.ws, { kind: 'end-session' });
+    const host = hosts.get(lease.code);
+    if (host) sendSSE(host, 'cmd', { kind: 'end-session' });
+    // Clean up pending requests for this session
+    for (const [id, p] of pending) {
+      if (p.sessionId === sessionId) {
+        clearTimeout(p.timer);
+        pending.delete(id);
+        if (p.resolve) p.resolve({ error: true });
+      }
+    }
   }
+
   function leaseFor(req, code) {
     const session = getSession(req), lease = session && leases.get(session.id);
     if (!session || !lease || lease.code !== code || lease.expires <= Date.now()) return null;
-    const host = hosts.get(code); if (!host || host.ws.readyState !== 1) return null;
+    const host = hosts.get(code);
+    if (!host || host.res.writableEnded) return null;
     return { session, host };
   }
+
   function routeCode(url) { return /^\/desktop\/([A-F0-9]{10})(?:\/|\?|$)/.exec(url || '')?.[1]; }
-  function headersFor(req) {
-    const headers = {};
-    for (const name of ['content-type', 'accept', 'range', 'if-none-match', 'authorization']) if (typeof req.headers[name] === 'string') headers[name] = req.headers[name];
-    if (req.headers.cookie) headers.cookie = req.headers.cookie.split(';').filter(v => !/^\s*sp_/.test(v)).join(';');
-    return headers;
-  }
-  app.post('/api/desktop/enroll', express.json({ limit: '2kb' }), sameOrigin, auth, (req, res) => {
+
+  // ===================== ENROLLMENT =====================
+  app.post('/api/desktop/enroll', sameOrigin, auth, (req, res) => {
     for (const [token, item] of enrollments) if (item.sessionId === req.session.id || item.expires < Date.now()) enrollments.delete(token);
     const token = crypto.randomBytes(32).toString('base64url'), expires = Date.now() + 10 * 60_000;
     enrollments.set(token, { expires, sessionId: req.session.id });
     res.json({ token, expires });
   });
-  app.post('/api/desktop/connect', express.json({ limit: '2kb' }), sameOrigin, auth, async (req, res) => {
+
+  // ===================== HOST SSE CONNECTION =====================
+  // Host connects via EventSource. Server pushes commands as SSE events.
+  app.get('/api/host/events', (req, res) => {
+    const code = String(req.query.code || '').trim().toUpperCase();
+    const secret = String(req.query.secret || '');
+    const salt = String(req.query.salt || '');
+    const passwordHash = String(req.query.passwordHash || '');
+    const enrollment = String(req.query.enrollment || '');
+
+    if (!validCode(code) || !/^[a-f0-9]{64}$/.test(secret) || !/^[a-f0-9]{32}$/.test(salt) || !/^[a-f0-9]{64}$/.test(passwordHash)) {
+      return res.status(400).json({ error: 'Invalid registration' });
+    }
+    if (hash(Buffer.from(secret, 'hex')).slice(0, 10).toUpperCase() !== code) {
+      return res.status(403).json({ error: 'Code mismatch' });
+    }
+
+    const existing = registry[code];
+    if (existing && !safeEqual(existing.secretHash, hash(secret))) {
+      return res.status(403).json({ error: 'Identity mismatch' });
+    }
+
+    // New device: require enrollment token
+    if (!existing) {
+      const token = enrollments.get(enrollment);
+      if (!token || token.expires < Date.now()) {
+        return res.status(403).json({ error: 'Create a fresh pairing code in the portal' });
+      }
+      enrollments.delete(enrollment);
+      if (Object.keys(registry).length >= 100) return res.status(409).json({ error: 'Too many devices' });
+    }
+
+    // Save/update device
+    registry[code] = { secretHash: hash(secret), salt, passwordHash };
+    try { save(); } catch { return res.status(500).json({ error: 'Save failed' }); }
+
+    // Disconnect old host connection for same code
+    const prior = hosts.get(code);
+    if (prior) {
+      for (const [id, lease] of leases) if (lease.code === code) releaseSession(id);
+      try { prior.res.end(); } catch {}
+      hosts.delete(code);
+    }
+
+    // Set up SSE stream
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-store',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.flushHeaders();
+    res.write(':connected\n\n');
+
+    const host = { res, code, sessionActive: false, sessionId: null, cookie: null };
+    hosts.set(code, host);
+    sendSSE(host, 'cmd', { kind: 'registered' });
+
+    // Keepalive
+    const keepalive = setInterval(() => {
+      if (host.res.writableEnded) { clearInterval(keepalive); return; }
+      try { host.res.write(':ping\n\n'); } catch { clearInterval(keepalive); }
+    }, 25000);
+
+    req.on('close', () => {
+      clearInterval(keepalive);
+      if (hosts.get(code) === host) {
+        hosts.delete(code);
+        for (const [id, lease] of leases) if (lease.code === code) { leases.delete(id); }
+        for (const [id, p] of pending) {
+          if (p.hostCode === code) { clearTimeout(p.timer); pending.delete(id); p.resolve?.({ error: true }); }
+        }
+      }
+    });
+  });
+
+  // ===================== HOST DATA POST =====================
+  // Host sends HTTP response data back via POST.
+  // Format: JSON header line + newline + binary payload
+  app.post('/api/host/data', (req, res) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', chunk => {
+      size += chunk.length;
+      if (size > 8 * 1024 * 1024) { req.destroy(); return; }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      try {
+        const raw = Buffer.concat(chunks);
+        const sep = raw.indexOf(0x0A);
+        if (sep < 0) return res.status(400).end();
+        const header = JSON.parse(raw.slice(0, sep).toString('utf8'));
+        const payload = raw.slice(sep + 1);
+        const code = header.code;
+        const host = hosts.get(code);
+        if (!host) return res.status(404).end();
+        const kind = header.kind;
+
+        if (kind === 'session-ready') {
+          host.sessionActive = true;
+          host.cookie = header.cookie || null;
+          host.sessionId = header.sessionId;
+          const p = pending.get(header.id);
+          if (p) { clearTimeout(p.timer); pending.delete(header.id); p.resolve?.({ ready: true }); }
+        } else if (kind === 'session-error') {
+          const p = pending.get(header.id);
+          if (p) { clearTimeout(p.timer); pending.delete(header.id); p.resolve?.({ error: true }); }
+        } else if (kind === 'headers') {
+          const p = pending.get(header.id);
+          if (p && p.proxyRes && !p.proxyRes.headersSent) {
+            const status = Number.isInteger(header.status) && header.status >= 100 && header.status < 600 ? header.status : 502;
+            p.proxyRes.statusCode = status;
+            const safe = ['content-type','content-length','content-range','accept-ranges','etag','location'];
+            for (const name of safe) {
+              if (typeof header.headers?.[name] === 'string' && !/[\r\n]/.test(header.headers[name])) {
+                if (name === 'location' && !header.headers[name].startsWith(`/desktop/${code}/`)) continue;
+                p.proxyRes.setHeader(name, header.headers[name]);
+              }
+            }
+            p.proxyRes.flushHeaders();
+          }
+        } else if (kind === 'chunk') {
+          const p = pending.get(header.id);
+          if (p && p.proxyRes && p.proxyRes.headersSent && !p.proxyRes.writableEnded) {
+            p.proxyRes.write(payload, () => {
+              // Credit back to host
+              sendSSE(host, 'cmd', { kind: 'credit', id: header.id });
+            });
+          }
+        } else if (kind === 'end') {
+          const p = pending.get(header.id);
+          if (p) {
+            clearTimeout(p.timer);
+            pending.delete(header.id);
+            if (p.proxyRes && !p.proxyRes.writableEnded) p.proxyRes.end();
+          }
+        } else if (kind === 'error') {
+          const p = pending.get(header.id);
+          if (p) {
+            clearTimeout(p.timer);
+            pending.delete(header.id);
+            if (p.proxyRes && !p.proxyRes.headersSent) { p.proxyRes.statusCode = 502; p.proxyRes.end(); }
+            else if (p.resolve) p.resolve({ error: true });
+          }
+        } else if (kind === 'session-ended') {
+          host.sessionActive = false;
+          host.cookie = null;
+        }
+
+        res.json({ ok: true });
+      } catch { res.status(400).end(); }
+    });
+  });
+
+  // ===================== VIEWER CONNECT =====================
+  app.post('/api/desktop/connect', sameOrigin, auth, async (req, res) => {
     const code = String(req.body?.code || '').trim().toUpperCase(), password = req.body?.password;
     const key = req.session.id + ':' + code, guard = attempts.get(key) || { count: 0, until: 0 };
     if (guard.until > Date.now()) return res.status(429).json({ error: 'Too many attempts; try later' });
     const device = validCode(code) && registry[code], host = hosts.get(code);
     let valid = false;
     if (device && typeof password === 'string' && password.length >= 12 && password.length <= 128) {
-      const actual = await scrypt(password, Buffer.from(device.salt, 'hex'), 32);
+      const actual = await scryptAsync(password, Buffer.from(device.salt, 'hex'), 32, { N: 16384, r: 8, p: 1 });
       valid = safeEqual(actual.toString('hex'), device.passwordHash);
     }
-    if (!valid || !host || host.ws.readyState !== 1) {
+    if (!valid || !host || host.res.writableEnded) {
       guard.count++; if (guard.count >= 5) { guard.count = 0; guard.until = Date.now() + 15 * 60_000; }
       attempts.set(key, guard); return res.status(401).json({ error: 'Host offline or device credentials invalid' });
     }
-    if ([...leases].some(([id, l]) => id !== req.session.id && l.code === code && l.expires > Date.now())) return res.status(409).json({ error: 'This device already has an active session' });
-    attempts.delete(key); release(req.session.id);
+    if ([...leases].some(([id, l]) => id !== req.session.id && l.code === code && l.expires > Date.now())) {
+      return res.status(409).json({ error: 'This device already has an active session' });
+    }
+    attempts.delete(key); releaseSession(req.session.id);
     leases.set(req.session.id, { code, expires: req.session.expires });
+
+    const sessionId = crypto.randomUUID();
     try {
       await new Promise((resolve, reject) => {
-        const id = crypto.randomUUID();
-        channels.set(id, { host, sessionId: req.session.id, type: 'control', resolve, reject, timeout: setTimeout(() => finish(id), 20000) });
-        send(host.ws, { kind: 'begin-session', id, password });
+        pending.set(sessionId, {
+          resolve, reject, hostCode: code, sessionId: req.session.id,
+          timer: setTimeout(() => { pending.delete(sessionId); reject(new Error('Timeout')); }, 25000)
+        });
+        sendSSE(host, 'cmd', { kind: 'begin-session', id: sessionId, password });
       });
       res.json({ url: `/desktop/${code}/`, code, engine: 'Sunshine / Moonlight Web' });
-    } catch { release(req.session.id); res.status(502).json({ error: 'Host engine could not start. Check the host app log.' }); }
+    } catch {
+      releaseSession(req.session.id);
+      res.status(502).json({ error: 'Host engine could not start. Check the host app log.' });
+    }
   });
-  app.post('/api/desktop/disconnect', express.json({ limit: '2kb' }), sameOrigin, auth, (req, res) => { release(req.session.id); res.json({ ok: true }); });
+
+  app.post('/api/desktop/disconnect', sameOrigin, auth, (req, res) => {
+    releaseSession(req.session.id); res.json({ ok: true });
+  });
+
   app.get('/api/desktop/status', auth, (req, res) => {
-    const lease = leases.get(req.session.id), online = lease && leaseFor(req, lease.code);
-    res.json({ connected: !!online, code: online ? lease.code : null });
+    const lease = leases.get(req.session.id);
+    const host = lease && hosts.get(lease.code);
+    res.json({ connected: !!(host && !host.res.writableEnded && host.sessionActive), code: lease?.code || null });
   });
+
+  // ===================== HTTP PROXY TO HOST =====================
   app.use('/desktop', async (req, res) => {
     const target = req.originalUrl, code = routeCode(target), selected = code && leaseFor(req, code);
     if (!selected) return res.status(401).send('Connect to this device from Remote Access first.');
@@ -99,101 +276,61 @@ export function installDesktop(app, { auth, sameOrigin, getSession, directory })
     if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
       try { if (new URL(req.headers.origin).host !== (req.headers['x-forwarded-host'] || req.headers.host)) return res.sendStatus(403); } catch { return res.sendStatus(403); }
     }
-    if ([...channels.values()].filter(c => c.host === selected.host).length >= 64) return res.status(429).send('Too many open requests');
+
+    const activePending = [...pending.values()].filter(p => p.hostCode === code).length;
+    if (activePending >= 64) return res.status(429).send('Too many open requests');
+
+    // Read request body
     const chunks = []; let size = 0;
     try { for await (const chunk of req) { size += chunk.length; if (size > 256 * 1024) return res.sendStatus(413); chunks.push(chunk); } } catch { return; }
+
     const id = crypto.randomUUID();
-    const channel = { host: selected.host, sessionId: selected.session.id, res, type: 'http', timeout: setTimeout(() => finish(id), 60000) };
-    channels.set(id, channel);
-    res.on('close', () => finish(id));
-    send(selected.host.ws, { kind: 'http', id, method: req.method, path: target, headers: headersFor(req), body: Buffer.concat(chunks).toString('base64') });
-  });
-  hostWss.on('connection', ws => {
-    let host;
-    ws.alive = true; ws.on('pong', () => ws.alive = true);
-    const timeout = setTimeout(() => ws.close(), 10000);
-    ws.on('message', (raw, binary) => {
-      if (binary) {
-        if (!host || raw.length < 17) return ws.close();
-        const kind = raw[0], id = uuid(raw.subarray(1,17)), channel = channels.get(id);
-        if (!channel || channel.host !== host) return;
-        const payload = raw.subarray(17);
-        if (kind === 1 && channel.type === 'http') {
-          if (!channel.res.headersSent) return finish(id);
-          channel.res.write(payload, () => send(ws, { kind: 'credit', id }));
-        } else if ((kind === 2 || kind === 3) && channel.type === 'ws') send(channel.ws, payload, kind === 3 ? true : null);
-        return;
-      }
-      let msg; try { msg = JSON.parse(raw); } catch { return ws.close(); }
-      if (!host) {
-        if (msg.kind !== 'register' || !validCode(msg.code) || !/^[a-f0-9]{64}$/.test(msg.secret) || !/^[a-f0-9]{32}$/.test(msg.salt) || !/^[a-f0-9]{64}$/.test(msg.passwordHash) || hash(Buffer.from(msg.secret,'hex')).slice(0,10).toUpperCase() !== msg.code) return ws.close();
-        const existing = registry[msg.code];
-        if (existing && !safeEqual(existing.secretHash, hash(msg.secret))) return ws.close();
-        if (!existing) {
-          const token = typeof msg.enrollment === 'string' && enrollments.get(msg.enrollment);
-          if (!token || token.expires < Date.now()) { send(ws, { kind: 'error', message: 'Create a fresh pairing code in the portal' }); return ws.close(); }
-          enrollments.delete(msg.enrollment);
-          if (Object.keys(registry).length >= 100) return ws.close();
-        }
-        registry[msg.code] = { secretHash: hash(msg.secret), salt: msg.salt, passwordHash: msg.passwordHash };
-        try { save(); } catch { return ws.close(); }
-        const prior = hosts.get(msg.code);
-        if (prior) {
-          for (const [id, lease] of leases) if (lease.code === msg.code) release(id);
-          prior.ws.close();
-        }
-        host = { ws, code: msg.code }; hosts.set(msg.code, host); clearTimeout(timeout);
-        send(ws, { kind: 'registered' }); return;
-      }
-      const channel = channels.get(msg.id);
-      if (!channel || channel.host !== host) return;
-      if (msg.kind === 'session-ready' && channel.type === 'control') { clearTimeout(channel.timeout); channels.delete(msg.id); channel.resolve(); return; }
-      if (msg.kind === 'headers' && channel.type === 'http' && !channel.res.headersSent) {
-        channel.res.statusCode = Number.isInteger(msg.status) && msg.status >= 200 && msg.status < 600 ? msg.status : 502;
-        for (const name of ['content-type','content-length','content-range','accept-ranges','etag']) if (typeof msg.headers?.[name] === 'string' && !/[\r\n]/.test(msg.headers[name])) channel.res.setHeader(name, msg.headers[name]);
-        if (typeof msg.headers?.location === 'string' && msg.headers.location.startsWith(`/desktop/${host.code}/`) && !/[\r\n]/.test(msg.headers.location)) channel.res.setHeader('Location', msg.headers.location);
-        if (Array.isArray(msg.cookies)) {
-          const cookies = msg.cookies.filter(c => typeof c === 'string' && !/[\r\n]/.test(c) && !/^sp_/i.test(c)).map(c => c.replace(/;\s*(?:Domain|Path)=[^;]*/gi, '') + `; Path=/desktop/${host.code}/; Secure; SameSite=Strict`);
-          if (cookies.length) channel.res.setHeader('Set-Cookie', cookies);
-        }
-        channel.res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-rIN45+SUBO4U012a5IK5piEITuk5/0Pm3JdMLlbiLSs='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' wss:; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'");
-        channel.res.flushHeaders();
-      } else if (msg.kind === 'end' && channel.type === 'http') { channel.res.end(); finish(msg.id, false); }
-      else if (msg.kind === 'closed' || msg.kind === 'error') finish(msg.id, false);
+    const headersToForward = {};
+    for (const name of ['content-type', 'accept', 'range', 'if-none-match']) {
+      if (typeof req.headers[name] === 'string') headersToForward[name] = req.headers[name];
+    }
+    if (req.headers.cookie) {
+      headersToForward.cookie = req.headers.cookie.split(';').filter(v => !/^\s*sp_/.test(v)).join(';');
+    }
+
+    // Send HTTP request to host via SSE
+    const sent = sendSSE(selected.host, 'cmd', {
+      kind: 'http', id,
+      method: req.method,
+      path: target,
+      headers: headersToForward,
+      body: Buffer.concat(chunks).toString('base64'),
     });
-    ws.on('close', () => {
-      clearTimeout(timeout);
-      if (host && hosts.get(host.code) === host) {
-        hosts.delete(host.code);
-        for (const [id, channel] of channels) if (channel.host === host) finish(id, false);
-        for (const [id, lease] of leases) if (lease.code === host.code) leases.delete(id);
-      }
+
+    if (!sent) return res.status(502).send('Host connection lost');
+
+    // Register pending response
+    pending.set(id, {
+      proxyRes: res, hostCode: code, sessionId: selected.session.id,
+      timer: setTimeout(() => {
+        pending.delete(id);
+        if (!res.headersSent) res.status(504).send('Host timed out');
+        else if (!res.writableEnded) res.end();
+      }, 60000),
     });
-    ws.on('error', () => {});
+
+    res.on('close', () => {
+      const p = pending.get(id);
+      if (p) { clearTimeout(p.timer); pending.delete(id); }
+    });
   });
+
+  // ===================== CLEANUP =====================
   const cleanup = setInterval(() => {
     const now = Date.now();
-    for (const [id, lease] of leases) if (lease.expires <= now) release(id);
+    for (const [id, lease] of leases) if (lease.expires <= now) releaseSession(id);
     for (const [id, token] of enrollments) if (token.expires <= now) enrollments.delete(id);
     for (const [id, guard] of attempts) if (guard.until && guard.until <= now) attempts.delete(id);
-    for (const ws of hostWss.clients) { if (!ws.alive) ws.terminate(); else { ws.alive = false; ws.ping(); } }
-  }, 20000); cleanup.unref();
+  }, 20000);
+  cleanup.unref();
+
   return {
-    release,
-    upgrade(req, socket, head) {
-      let pathname; try { pathname = new URL(req.url, 'http://localhost').pathname; } catch { socket.destroy(); return true; }
-      if (pathname === '/host-link') { hostWss.handleUpgrade(req,socket,head,ws=>hostWss.emit('connection',ws)); return true; }
-      if (!pathname.startsWith('/desktop/')) return false;
-      const code = routeCode(req.url), selected = code && leaseFor(req,code);
-      let valid = false; try { valid = new URL(req.headers.origin).host === (req.headers['x-forwarded-host'] || req.headers.host); } catch {}
-      if (!selected || !valid || [...channels.values()].filter(c=>c.host===selected.host).length>=64) { socket.destroy(); return true; }
-      viewerWss.handleUpgrade(req,socket,head,ws=>{
-        const id=crypto.randomUUID(), channel={host:selected.host,sessionId:selected.session.id,ws,type:'ws',stream:pathname.endsWith('/api/host/stream')};
-        channels.set(id,channel);
-        send(selected.host.ws,{kind:'ws',id,path:req.url,headers:headersFor(req),protocols:(req.headers['sec-websocket-protocol']||'').split(',').map(v=>v.trim()).filter(Boolean)});
-        ws.on('message',(data,binary)=>send(selected.host.ws,packet(binary?3:2,id,data),true));
-        ws.on('close',()=>finish(id)); ws.on('error',()=>finish(id));
-      }); return true;
-    }
+    release: releaseSession,
+    upgrade() { return false; }, // No WebSocket upgrade
   };
 }

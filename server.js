@@ -5,20 +5,15 @@ import { createChatStore, attachChat } from './chat.js';
 import { installChatHttp } from './chat-http.js';
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { WebSocketServer } from 'ws';
 import webpush from 'web-push';
-import { availableModels, refreshModels, modelDiagnostics, modelInfo, parseImage, cloudAnswer } from './ai.js';
 
 const password = process.env.SPOWER_PASSWORD;
 if (!password) throw new Error('Missing SPOWER_PASSWORD: add it in Railway service Variables and deploy the staged change');
 const sessions = new Map();
 const attempts = new Map();
 const subscriptions = new Map();
-const aiUsage = new Map();
-const aiBusy = new Set();
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocketServer({ noServer: true, maxPayload: 8192 });
 const vapidReady = !!(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY && process.env.VAPID_SUBJECT);
 if (vapidReady) webpush.setVapidDetails(process.env.VAPID_SUBJECT, process.env.VAPID_PUBLIC_KEY, process.env.VAPID_PRIVATE_KEY);
 app.disable('x-powered-by');
@@ -26,11 +21,10 @@ app.use((req, res, next) => {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' wss: ws:; frame-src 'self' https:; object-src 'none'; base-uri 'none'; form-action 'self'");
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; frame-src 'self' https://www.youtube-nocookie.com https://www.youtube.com; object-src 'none'; base-uri 'none'; form-action 'self'");
   next();
 });
 const desktop = installDesktop(app, { auth, sameOrigin, getSession, directory: process.env.DATA_DIR || './data' });
-app.use('/api/ai/chat', express.json({ limit: '4mb' }));
 app.use(express.json({ limit: '20kb' }));
 
 function token(req) {
@@ -57,6 +51,7 @@ function sameOrigin(req, res, next) {
 }
 function digest(s) { return crypto.createHash('sha256').update(s).digest(); }
 function setCookie(res, id) { res.setHeader('Set-Cookie', `sp_session=${encodeURIComponent(id)}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=28800`); }
+
 app.post('/api/login', sameOrigin, (req, res) => {
   const ip = req.ip;
   const state = attempts.get(ip) || { n: 0, until: 0 };
@@ -76,7 +71,15 @@ app.post('/api/login', sameOrigin, (req, res) => {
   setCookie(res, id);
   res.json({ ok: true });
 });
-app.get('/api/me', auth, async (req, res) => { await refreshModels(); res.json({ aiDiagnostics: modelDiagnostics(), ok: true, sessionTag: req.session.chatId, vapid: vapidReady ? process.env.VAPID_PUBLIC_KEY : null, aiModels: availableModels(), aiDailyLimit: process.env.AI_DAILY_REQUEST_LIMIT === undefined ? 100 : Math.max(0, Number(process.env.AI_DAILY_REQUEST_LIMIT) || 0) }); });
+
+app.get('/api/me', auth, (req, res) => {
+  res.json({
+    ok: true,
+    sessionTag: req.session.chatId,
+    vapid: vapidReady ? process.env.VAPID_PUBLIC_KEY : null,
+  });
+});
+
 app.post('/api/logout', sameOrigin, auth, async (req, res) => {
   chat.disconnect(req.session.id);
   desktop.release(req.session.id);
@@ -85,31 +88,175 @@ app.post('/api/logout', sameOrigin, auth, async (req, res) => {
   res.setHeader('Set-Cookie', 'sp_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0');
   res.json({ ok: true });
 });
-app.post('/api/ai/chat', sameOrigin, auth, async (req, res) => {
-  const info = modelInfo(req.body?.model);
-  if (!info) return res.status(400).json({ error: 'Unknown AI model' });
-  const entries = req.body?.history;
-  if (!Array.isArray(entries) || entries.length < 1 || entries.length > 12 || !entries.every((v, i) => v && v.role === (i % 2 ? 'assistant' : 'user') && typeof v.text === 'string' && v.text.length > 0 && v.text.length <= 4000) || entries.at(-1).role !== 'user') return res.status(400).json({ error: 'Invalid conversation' });
-  let image;
-  try { image = parseImage(req.body.image); } catch (error) { return res.status(400).json({ error: error.message }); }
-  const id = req.session.id;
-  if (aiBusy.has(id)) return res.status(429).json({ error: 'Wait for your current response' });
-  const day = new Date().toISOString().slice(0, 10);
-  const limit = process.env.AI_DAILY_REQUEST_LIMIT === undefined ? 100 : Math.max(0, Number(process.env.AI_DAILY_REQUEST_LIMIT) || 0);
-  const usage = aiUsage.get(id);
-  const used = usage?.day === day ? usage.count : 0;
-  if (limit && used >= limit) return res.status(429).json({ error: 'Daily limit reached; it resets at 00:00 UTC' });
-  if (!process.env[info.env]) return res.status(503).json({ error: 'Add this provider API key in Railway variables' });
-  aiBusy.add(id);
-  aiUsage.set(id, { day, count: used + 1 });
-  try {
-    const answer = await cloudAnswer(req.body.model, entries, image);
-    res.json({ answer, usedToday: used + 1, day });
-  } catch (error) {
-    aiUsage.set(id, { day, count: used });
-    res.status(502).json({ error: error.message || 'AI request failed' });
-  } finally { aiBusy.delete(id); }
+
+// ======================================================
+// YOUTUBE SEARCH via Piped API (free, no API key)
+// ======================================================
+const PIPED_INSTANCES = [
+  'https://pipedapi.kavin.rocks',
+  'https://pipedapi.adminforge.de',
+  'https://pipedapi.in.projectsegfau.lt',
+];
+let pipedIndex = 0;
+
+app.get('/api/youtube/search', auth, async (req, res) => {
+  const query = String(req.query.q || '').trim();
+  if (!query) return res.status(400).json({ error: 'Search query required' });
+  const errors = [];
+  for (let i = 0; i < PIPED_INSTANCES.length; i++) {
+    const instance = PIPED_INSTANCES[(pipedIndex + i) % PIPED_INSTANCES.length];
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 12000);
+      const r = await fetch(`${instance}/search?q=${encodeURIComponent(query)}&filter=videos`, {
+        signal: controller.signal,
+        headers: { 'Accept': 'application/json' },
+      });
+      clearTimeout(timer);
+      if (!r.ok) { errors.push(`${instance}: ${r.status}`); continue; }
+      const data = await r.json();
+      pipedIndex = (pipedIndex + i) % PIPED_INSTANCES.length;
+      const items = (data.items || []).filter(v => v.type === 'stream').slice(0, 20).map(v => ({
+        id: (v.url || '').replace('/watch?v=', ''),
+        title: v.title || '',
+        thumbnail: v.thumbnail || '',
+        duration: v.duration || 0,
+        uploaderName: v.uploaderName || '',
+        views: v.views || 0,
+        uploaded: v.uploaded || 0,
+      }));
+      return res.json({ items });
+    } catch (e) { errors.push(`${instance}: ${e.message}`); }
+  }
+  res.status(502).json({ error: 'YouTube search unavailable', details: errors });
 });
+
+app.get('/api/youtube/trending', auth, async (req, res) => {
+  const errors = [];
+  for (let i = 0; i < PIPED_INSTANCES.length; i++) {
+    const instance = PIPED_INSTANCES[(pipedIndex + i) % PIPED_INSTANCES.length];
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 12000);
+      const r = await fetch(`${instance}/trending?region=${req.query.region || 'US'}`, {
+        signal: controller.signal,
+        headers: { 'Accept': 'application/json' },
+      });
+      clearTimeout(timer);
+      if (!r.ok) continue;
+      const data = await r.json();
+      pipedIndex = (pipedIndex + i) % PIPED_INSTANCES.length;
+      const items = (data || []).slice(0, 20).map(v => ({
+        id: (v.url || '').replace('/watch?v=', ''),
+        title: v.title || '',
+        thumbnail: v.thumbnail || '',
+        duration: v.duration || 0,
+        uploaderName: v.uploaderName || '',
+        views: v.views || 0,
+        uploaded: v.uploaded || 0,
+      }));
+      return res.json({ items });
+    } catch (e) { errors.push(`${instance}: ${e.message}`); }
+  }
+  res.status(502).json({ error: 'Trending unavailable' });
+});
+
+// ======================================================
+// LIGHTWEIGHT BROWSER PROXY
+// ======================================================
+const PROXY_MAX_SIZE = 4 * 1024 * 1024; // 4MB max page size
+const BLOCKED_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '[::]', '[::1]']);
+
+app.get('/api/browse', auth, async (req, res) => {
+  const target = String(req.query.url || '').trim();
+  if (!target) return res.status(400).json({ error: 'URL required' });
+  let parsed;
+  try {
+    parsed = new URL(target);
+    if (!['http:', 'https:'].includes(parsed.protocol)) throw Error();
+    if (BLOCKED_HOSTS.has(parsed.hostname)) throw Error();
+  } catch { return res.status(400).json({ error: 'Invalid URL' }); }
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    const r = await fetch(target, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
+      },
+      redirect: 'follow',
+    });
+    clearTimeout(timer);
+    const contentType = r.headers.get('content-type') || '';
+    if (!contentType.includes('text/html') && !contentType.includes('application/xhtml')) {
+      return res.status(415).json({ error: 'Not an HTML page' });
+    }
+    const html = await r.text();
+    if (html.length > PROXY_MAX_SIZE) return res.status(413).json({ error: 'Page too large' });
+
+    // Rewrite relative URLs to absolute and inject base tag
+    const base = `${parsed.protocol}//${parsed.host}`;
+    const injectedHtml = html
+      .replace(/<head([^>]*)>/i, `<head$1><base href="${base}/" target="_self">`)
+      .replace(/<script[\s\S]*?<\/script>/gi, '') // Remove scripts for safety
+      .replace(/on\w+="[^"]*"/gi, ''); // Remove inline event handlers
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Content-Security-Policy', "default-src * 'unsafe-inline'; script-src 'none'; frame-src 'none'");
+    res.send(injectedHtml);
+  } catch (e) {
+    res.status(502).json({ error: e.name === 'AbortError' ? 'Page load timed out' : `Failed to load: ${e.message}` });
+  }
+});
+
+// Google search proxy
+app.get('/api/search', auth, async (req, res) => {
+  const query = String(req.query.q || '').trim();
+  if (!query) return res.status(400).json({ error: 'Search query required' });
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000);
+    const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+    const r = await fetch(searchUrl, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+        'Accept': 'text/html',
+      },
+    });
+    clearTimeout(timer);
+    const html = await r.text();
+    // Parse DuckDuckGo HTML results
+    const results = [];
+    const regex = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
+    let match;
+    while ((match = regex.exec(html)) !== null && results.length < 15) {
+      const url = decodeURIComponent(match[1].replace(/.*uddg=/, '').replace(/&.*/, ''));
+      const title = match[2].replace(/<[^>]+>/g, '').trim();
+      const snippet = match[3].replace(/<[^>]+>/g, '').trim();
+      if (url.startsWith('http') && title) results.push({ url, title, snippet });
+    }
+    // Fallback: simpler parsing
+    if (!results.length) {
+      const linkRegex = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+      while ((match = linkRegex.exec(html)) !== null && results.length < 15) {
+        let url = match[1];
+        try { url = decodeURIComponent(url.replace(/.*uddg=/, '').replace(/&.*/, '')); } catch {}
+        const title = match[2].replace(/<[^>]+>/g, '').trim();
+        if (url.startsWith('http') && title) results.push({ url, title, snippet: '' });
+      }
+    }
+    res.json({ results });
+  } catch (e) {
+    res.status(502).json({ error: 'Search failed' });
+  }
+});
+
+// ======================================================
+// PUSH NOTIFICATIONS
+// ======================================================
 app.get('/api/host/download', auth, (req, res) => res.download(path.resolve('downloads/S-Power-Host.zip'), 'S-Power-Host.zip'));
 app.post('/api/push/disable', sameOrigin, auth, (req, res) => { subscriptions.delete(req.session.id); res.json({ ok: true }); });
 app.post('/api/push', sameOrigin, auth, (req, res) => {
@@ -121,30 +268,39 @@ app.post('/api/push', sameOrigin, auth, (req, res) => {
 });
 app.get('/health', (req, res) => res.json({ ok: true }));
 app.use(express.static('public', { index: 'index.html' }));
-server.on('upgrade', (req, socket, head) => {
-  if (desktop.upgrade(req, socket, head)) return;
-  const origin = req.headers.origin;
-  const host = req.headers['x-forwarded-host'] || req.headers.host;
-  const session = getSession(req);
-  let path;
-  try { path = new URL(req.url, 'http://localhost').pathname; } catch { socket.destroy(); return; }
-  let validOrigin = false;
-  try { validOrigin = !!origin && new URL(origin).host === host; } catch {}
-  if (!session || !validOrigin) { socket.destroy(); return; }
-  if (path !== '/ws') { socket.destroy(); return; }
-  wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req, session));
-});
+
+// ======================================================
+// CHAT (HTTP-only, no WebSocket upgrade)
+// ======================================================
+// Internal EventEmitter-based chat hub (no external WebSocket)
+import { EventEmitter } from 'node:events';
+class InternalHub extends EventEmitter {
+  constructor() { super(); this.clients = new Set(); }
+  // Mimics WSS enough for chat.js attachChat
+  handleUpgrade() {}
+}
+const chatHub = new InternalHub();
 const chatStore = createChatStore(process.env.DATA_DIR || './data');
-const chat = attachChat(wss, { sessions, store: chatStore, notify: (sessionId, item) => {
+const chat = attachChat(chatHub, { sessions, store: chatStore, notify: (sessionId, item) => {
   const subscription = subscriptions.get(sessionId);
   if (!vapidReady || !subscription) return;
   webpush.sendNotification(subscription, JSON.stringify({ title: item.toId ? 'Private message' : 'You were mentioned', body: `${item.from}: ${item.sticker ? 'Sticker' : item.text.slice(0, 100)}` })).catch(error => { if ([404, 410].includes(error.statusCode)) subscriptions.delete(sessionId); });
 } });
-installChatHttp(app, { wss, auth, sameOrigin });
+installChatHttp(app, { wss: chatHub, auth, sameOrigin });
+
+// ======================================================
+// DESKTOP (SSE-based, no WebSocket upgrade needed on server)
+// ======================================================
+// Desktop host connections use SSE + HTTP POST (handled in desktop.js)
+// No server.on('upgrade') needed
+
+// ======================================================
+// CLEANUP
+// ======================================================
 setInterval(async () => {
   const now = Date.now();
   for (const [id, session] of sessions) if (session.expires < now) { sessions.delete(id); subscriptions.delete(id); }
   for (const [ip, entry] of attempts) if (entry.until < now && !entry.n) attempts.delete(ip);
-  for (const [id, usage] of aiUsage) if (!sessions.has(id) || usage.day !== new Date().toISOString().slice(0, 10)) aiUsage.delete(id);
 }, 60_000).unref();
+
 server.listen(Number(process.env.PORT) || 3000, '0.0.0.0');
