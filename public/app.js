@@ -1,6 +1,6 @@
 const body = document.body;
 let keys = 0, taps = [], ws, username = localStorage.getItem('sp_name') || '', myConfig;
-const glyphs = { browser: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a18 18 0 0 1 0 18 18 18 0 0 1 0-18"/>', youtube: '<polygon points="10 8 16 12 10 16"/><rect x="2" y="4" width="20" height="16" rx="4"/>', remote: '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>', chat: '<path d="M21 11a8 8 0 0 1-8 8H6l-4 3V11a9 9 0 0 1 19 0Z"/><path d="M7 11h10M7 7h6"/>', settings: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2"/>', exit: '<path d="M9 4H4v16h5m5-13 5 5-5 5m-5-5h10"/>', full: '<path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/>', arrow: '<path d="M12 20V4m-6 6 6-6 6 6"/>', plus: '<path d="M12 4v16M4 12h16"/>', copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M15 4H4v11"/>', search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/>', play: '<polygon points="10 8 16 12 10 16"/>', back: '<path d="M19 12H5m7-7-7 7 7 7"/>' };
+const glyphs = { browser: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a18 18 0 0 1 0 18 18 18 0 0 1 0-18"/>', youtube: '<polygon points="10 8 16 12 10 16"/><rect x="2" y="4" width="20" height="16" rx="4"/>', remote: '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>', chat: '<path d="M21 11a8 8 0 0 1-8 8H6l-4 3V11a9 9 0 0 1 19 0Z"/><path d="M7 11h10M7 7h6"/>', settings: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2"/>', exit: '<path d="M9 4H4v16h5m5-13 5 5-5 5m-5-5h10"/>', full: '<path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/>', arrow: '<path d="M12 20V4m-6 6 6-6 6 6"/>', plus: '<path d="M12 4v16M4 12h16"/>', copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M15 4H4v11"/>', search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/>', play: '<polygon points="10 8 16 12 10 16"/>', back: '<path d="M19 12H5m7-7-7 7 7 7"/>', forward: '<path d="M5 12h14m-7-7 7 7-7 7"/>', reload: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/>', home: '<path d="m3 11 9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1Z"/>' };
 function icon(name) { const span = document.createElement('span'); span.className = 'icon'; span.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${glyphs[name] || glyphs.browser}</svg>`; return span; }
 function el(tag, attrs = {}, children = []) { const n = document.createElement(tag); for (const [k, v] of Object.entries(attrs)) { if (k === 'text') n.textContent = v; else if (k === 'class') n.className = v; else n.setAttribute(k, v); } for (const c of children) n.append(c); return n; }
 function message(container, value) { container.textContent = value; }
@@ -42,162 +42,202 @@ document.addEventListener('pointerdown',()=>{if(!body.classList.contains('unlock
 function beep(){if(!prefs.sound||!soundContext)return;const a=soundContext;[660,880].forEach((f,i)=>{const o=a.createOscillator(),g=a.createGain(),t=a.currentTime+i*.13;o.type='sine';o.frequency.value=f;g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(prefs.volume*.12,t+.015);g.gain.exponentialRampToValueAtTime(.001,t+.22);o.connect(g).connect(a.destination);o.start(t);o.stop(t+.23)})}
 
 // ======================================================
-// BROWSER PANEL
+// BROWSER PANEL — live browsing through the server's IP
 // ======================================================
+let proxyReady = null;
+function setupProxy() {
+  return proxyReady ||= (async () => {
+    if (!('serviceWorker' in navigator)) throw Error('This browser does not support service workers');
+    await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+    await navigator.serviceWorker.ready;
+    const { BareMuxConnection } = await import('/baremux/index.mjs');
+    const connection = new BareMuxConnection('/baremux/worker.js');
+    if (!myConfig?.proxyToken) throw Error('Sign in again to use the browser');
+    await connection.setTransport('/baremod/index.mjs', [location.origin + '/bare/' + myConfig.proxyToken + '/']);
+  })().catch(e => { proxyReady = null; throw e; });
+}
+const uvPrefix = '/uv/service/';
+function uvEncode(str) { let t = ''; for (let i = 0; i < str.length; i++) t += i % 2 ? String.fromCharCode(str.charCodeAt(i) ^ 2) : str[i]; return encodeURIComponent(t); }
+function uvDecode(str) { const [input, ...search] = str.split('?'); let t = ''; const d = decodeURIComponent(input); for (let i = 0; i < d.length; i++) t += i % 2 ? String.fromCharCode(d.charCodeAt(i) ^ 2) : d[i]; return t + (search.length ? '?' + search.join('?') : ''); }
+const searchEngines = { google: 'https://www.google.com/search?q=', duckduckgo: 'https://duckduckgo.com/?q=', bing: 'https://www.bing.com/search?q=' };
+function toUrl(input, engine) {
+  const q = input.trim();
+  if (/^https?:\/\//i.test(q)) return q;
+  if (/^[^\s/]+\.[a-z]{2,}(?:[/:?#].*)?$/i.test(q)) return 'https://' + q;
+  return (searchEngines[engine] || searchEngines.google) + encodeURIComponent(q);
+}
 function browserPanel(s) {
-  heading(s, 'EXPLORE THE WEB', 'Browser');
-  const urlBar = el('input', { type: 'url', placeholder: 'Enter URL or search...', 'aria-label': 'URL or search', class: 'browser-url' });
-  const goBtn = button('Go', () => navigate(), 'arrow', 'primary');
-  const backBtn = button('Back', () => { if (history.length > 0) { historyIdx--; if (historyIdx >= 0) loadPage(browseHistory[historyIdx], false); } }, 'back', '');
-  const form = el('form', { class: 'browser-bar' }, [urlBar, goBtn]);
-  form.onsubmit = e => { e.preventDefault(); navigate(); };
-
-  const frame = el('iframe', { class: 'browser-frame', title: 'Web browser', sandbox: 'allow-same-origin allow-forms' });
-  const stage = el('div', { class: 'browser-stage' }, [
-    el('div', { class: 'browser-toolbar' }, [backBtn, el('span', { class: 'browser-tab', text: 'Web Browser' })]),
-    frame
+  heading(s, 'LIVE WEB · VIA SERVER', 'Browser');
+  const urlBar = el('input', { type: 'text', inputmode: 'url', placeholder: 'Search Google or type a URL', 'aria-label': 'URL or search', class: 'browser-url', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false' });
+  const engine = el('select', { 'aria-label': 'Search engine', class: 'engine-select' });
+  for (const [v, t] of [['google', 'Google'], ['duckduckgo', 'DuckDuckGo'], ['bing', 'Bing']]) engine.append(el('option', { value: v, text: t }));
+  try { engine.value = localStorage.getItem('sp_engine') || 'google'; } catch {}
+  engine.onchange = () => { try { localStorage.setItem('sp_engine', engine.value); } catch {} };
+  const form = el('form', { class: 'browser-bar' }, [urlBar, el('div', { class: 'browser-bar-actions' }, [engine, button('Go', null, 'arrow', 'primary')])]);
+  form.lastChild.lastChild.type = 'submit';
+  const frame = el('iframe', { class: 'browser-frame', title: 'Web browser', allow: 'autoplay; fullscreen; clipboard-read; clipboard-write; encrypted-media; picture-in-picture', referrerpolicy: 'no-referrer' });
+  const status = el('span', { class: 'browser-tab', text: 'New tab' });
+  const loading = el('div', { class: 'browser-progress hidden' });
+  const nav = (fn) => () => { try { fn(frame.contentWindow); } catch {} };
+  const toolbar = el('div', { class: 'browser-toolbar' }, [
+    el('div', { class: 'toolbar-actions' }, [
+      button('Back', nav(w => w.history.back()), 'back', 'icon-button'),
+      button('Forward', nav(w => w.history.forward()), 'forward', 'icon-button'),
+      button('Reload', nav(w => w.location.reload()), 'reload', 'icon-button'),
+      button('Home', () => open('https://www.google.com/'), 'home', 'icon-button'),
+    ]),
+    status,
+    button('Full screen', () => stage.requestFullscreen?.().catch(() => toast('Full screen unavailable')), 'full', 'icon-button'),
   ]);
-  const searchResults = el('div', { class: 'search-results' });
-  const welcome = el('div', { class: 'browser-empty' }, [icon('browser'), el('h2', { text: 'Browse the web' }), el('p', { class: 'muted', text: 'Enter a URL or search for anything' })]);
-  const content = el('div', { class: 'browser-content' }, [welcome]);
+  const quick = el('div', { class: 'quick-links' });
+  for (const [label, url] of [['Google', 'https://www.google.com/'], ['YouTube', 'https://www.youtube.com/'], ['Wikipedia', 'https://www.wikipedia.org/'], ['Reddit', 'https://old.reddit.com/'], ['X', 'https://x.com/'], ['GitHub', 'https://github.com/']]) quick.append(button(label, () => open(url), null, 'quick-link'));
+  const welcome = el('div', { class: 'browser-empty' }, [icon('browser'), el('h2', { text: 'Browse through the server' }), el('p', { class: 'muted', text: 'Pages load on the server’s IP and stream to you over HTTPS. Scripts, logins and videos work like a normal browser.' }), quick]);
+  const stage = el('div', { class: 'browser-stage' }, [toolbar, loading, welcome]);
+  s.append(form, stage);
 
-  s.append(form, content);
-
-  let browseHistory = [], historyIdx = -1;
-
-  function navigate() {
-    const q = urlBar.value.trim();
-    if (!q) return;
-    if (/^https?:\/\//i.test(q) || /^[a-z0-9-]+\.[a-z]{2,}/i.test(q)) {
-      const url = q.startsWith('http') ? q : 'https://' + q;
-      loadPage(url, true);
-    } else {
-      doSearch(q);
-    }
+  function current() {
+    try { const p = frame.contentWindow.location.pathname + frame.contentWindow.location.search; if (p.startsWith(uvPrefix)) return uvDecode(p.slice(uvPrefix.length)); } catch {}
+    return '';
   }
-
-  async function loadPage(url, addHistory) {
-    content.replaceChildren(el('div', { class: 'thinking', text: 'Loading page...' }));
-    try {
-      const r = await fetch(`/api/browse?url=${encodeURIComponent(url)}`, { credentials: 'same-origin' });
-      if (!r.ok) { const e = await r.json().catch(() => ({})); throw Error(e.error || 'Failed to load'); }
-      const html = await r.text();
-      frame.srcdoc = html;
-      content.replaceChildren(stage);
-      if (addHistory) { browseHistory = browseHistory.slice(0, historyIdx + 1); browseHistory.push(url); historyIdx = browseHistory.length - 1; }
-      urlBar.value = url;
-    } catch (e) { content.replaceChildren(el('p', { class: 'error', text: e.message })); }
+  frame.addEventListener('load', () => {
+    loading.classList.add('hidden');
+    const url = current();
+    if (url) { if (document.activeElement !== urlBar) urlBar.value = url; try { status.textContent = frame.contentDocument.title || new URL(url).hostname; } catch { status.textContent = url; } }
+  });
+  async function open(url) {
+    loading.classList.remove('hidden'); status.textContent = 'Starting engine…';
+    try { await setupProxy(); } catch (e) { loading.classList.add('hidden'); status.textContent = 'Engine failed'; return toast('Browser engine failed: ' + e.message); }
+    if (!frame.isConnected) { welcome.remove(); stage.append(frame); }
+    urlBar.value = url; status.textContent = 'Loading…';
+    frame.src = uvPrefix + uvEncode(url);
   }
-
-  async function doSearch(query) {
-    content.replaceChildren(el('div', { class: 'thinking', text: 'Searching...' }));
-    try {
-      const r = await api(`/api/search?q=${encodeURIComponent(query)}`);
-      if (r.error) throw Error(r.error);
-      if (!r.results?.length) { content.replaceChildren(el('p', { class: 'muted', text: 'No results found' })); return; }
-      searchResults.replaceChildren();
-      for (const item of r.results) {
-        const card = el('a', { href: '#', class: 'search-card' }, [
-          el('strong', { text: item.title }),
-          el('small', { class: 'muted', text: item.url }),
-          item.snippet ? el('p', { text: item.snippet }) : null
-        ].filter(Boolean));
-        card.onclick = e => { e.preventDefault(); urlBar.value = item.url; loadPage(item.url, true); };
-        searchResults.append(card);
-      }
-      content.replaceChildren(el('h3', { text: `Results for "${query}"`, class: 'search-title' }), searchResults);
-    } catch (e) { content.replaceChildren(el('p', { class: 'error', text: e.message })); }
-  }
+  form.onsubmit = e => { e.preventDefault(); if (urlBar.value.trim()) { open(toUrl(urlBar.value, engine.value)); urlBar.blur(); } };
+  setupProxy().catch(() => {});
 }
 
 // ======================================================
-// YOUTUBE PANEL
+// YOUTUBE PANEL — search + playback streamed through the server
 // ======================================================
+function formatDuration(seconds) { if (!seconds) return ''; const h = Math.floor(seconds / 3600), m = Math.floor(seconds % 3600 / 60), s2 = seconds % 60; return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(s2).padStart(2, '0'); }
+function formatViews(n) { if (!n) return ''; if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B views'; if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M views'; if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K views'; return n + ' views'; }
 function youtubePanel(s) {
-  heading(s, 'WATCH & DISCOVER', 'YouTube');
-  const searchInput = el('input', { type: 'text', placeholder: 'Search YouTube...', 'aria-label': 'YouTube search' });
-  const searchBtn = button('Search', () => ytSearch(), 'search', 'primary');
-  const trendBtn = button('Trending', () => ytTrending(), null, '');
-  const form = el('form', { class: 'yt-bar' }, [searchInput, searchBtn, trendBtn]);
-  form.onsubmit = e => { e.preventDefault(); ytSearch(); };
-
+  heading(s, 'WATCH · VIA SERVER', 'YouTube');
+  const searchInput = el('input', { type: 'search', placeholder: 'Search YouTube or paste a link', 'aria-label': 'YouTube search', dir: 'auto', enterkeyhint: 'search' });
+  const form = el('form', { class: 'yt-bar' }, [searchInput, button('Search', null, 'search', 'primary'), button('Home', () => loadHome(), null, '')]);
+  form.children[1].type = 'submit';
   const playerArea = el('div', { class: 'yt-player hidden' });
-  const resultsArea = el('div', { class: 'yt-results' });
-  const welcome = el('div', { class: 'browser-empty' }, [icon('youtube'), el('h2', { text: 'YouTube' }), el('p', { class: 'muted', text: 'Search for videos or browse trending' })]);
-  const content = el('div', { class: 'yt-content' }, [welcome]);
-
+  const content = el('div', { class: 'yt-content' });
   s.append(form, playerArea, content);
 
-  function playVideo(id, title) {
-    playerArea.replaceChildren(
-      el('div', { class: 'yt-player-wrapper' }, [
-        el('iframe', { src: `https://www.youtube-nocookie.com/embed/${id}?autoplay=1`, class: 'yt-iframe', title: title || 'YouTube video', allow: 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share', allowfullscreen: '' }),
-        el('div', { class: 'yt-player-info' }, [
-          el('h3', { text: title || 'Video' }),
-          button('Close', () => { playerArea.replaceChildren(); playerArea.classList.add('hidden'); }, null, '')
-        ])
-      ])
-    );
+  let player = null;
+  function stopPlayer() { if (player) { player.destroy(); player = null; } playerArea.replaceChildren(); playerArea.classList.add('hidden'); }
+
+  function linkId(text) {
+    const t = text.trim();
+    try { const u = new URL(t); if (/youtu\.be$/.test(u.hostname)) return u.pathname.slice(1, 12); if (/youtube\.com$/.test(u.hostname)) return u.searchParams.get('v') || (u.pathname.match(/\/(?:shorts|embed|live)\/([A-Za-z0-9_-]{11})/) || [])[1] || null; } catch {}
+    return null;
+  }
+
+  async function play(id, meta = {}) {
+    stopPlayer();
+    const video = el('video', { class: 'yt-video', controls: '', playsinline: '', preload: 'auto', poster: `/api/yt/thumb/${id}` });
+    const audio = el('audio', { preload: 'auto', class: 'hidden' });
+    const quality = el('select', { 'aria-label': 'Quality', class: 'yt-quality' });
+    const title = el('h3', { text: meta.title || 'Loading…', dir: 'auto' });
+    const sub = el('small', { class: 'muted', text: 'Resolving stream on the server…' });
+    playerArea.append(el('div', { class: 'yt-player-wrapper' }, [video, audio, el('div', { class: 'yt-player-info' }, [el('div', { class: 'yt-player-text' }, [title, sub]), el('div', { class: 'yt-player-actions' }, [quality, button('Close', stopPlayer, null, '')])])]));
     playerArea.classList.remove('hidden');
-    playerArea.scrollIntoView({ behavior: 'smooth' });
-  }
+    playerArea.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
-  function formatDuration(seconds) {
-    if (!seconds) return '';
-    const m = Math.floor(seconds / 60), s2 = seconds % 60;
-    return `${m}:${String(s2).padStart(2, '0')}`;
-  }
+    let info = null, current = null, retried = false, syncTimer = 0, resumeAfterAudio = false, alive = true;
+    player = { destroy() { alive = false; clearInterval(syncTimer); for (const m of [video, audio]) { m.pause(); m.removeAttribute('src'); m.load(); } } };
 
-  function formatViews(n) {
-    if (!n) return '';
-    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M views';
-    if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K views';
-    return n + ' views';
+    const split = () => current?.mode === 'split';
+    function sync() { if (split() && !video.paused && Math.abs(audio.currentTime - video.currentTime) > 0.35) audio.currentTime = video.currentTime; }
+    video.addEventListener('play', () => { if (split()) { audio.currentTime = video.currentTime; audio.play().catch(() => {}); } });
+    video.addEventListener('pause', () => { if (split()) audio.pause(); });
+    video.addEventListener('seeking', () => { if (split()) audio.currentTime = video.currentTime; });
+    video.addEventListener('waiting', () => { if (split()) audio.pause(); });
+    video.addEventListener('playing', () => { if (split()) { sync(); audio.play().catch(() => {}); } });
+    video.addEventListener('ratechange', () => { audio.playbackRate = video.playbackRate; });
+    video.addEventListener('volumechange', () => { audio.volume = video.volume; audio.muted = video.muted; });
+    audio.addEventListener('waiting', () => { if (split() && !video.paused) { resumeAfterAudio = true; video.pause(); } });
+    audio.addEventListener('canplay', () => { if (resumeAfterAudio) { resumeAfterAudio = false; video.play().catch(() => {}); } });
+    syncTimer = setInterval(sync, 1000);
+
+    async function onError() {
+      if (!alive || retried) { if (alive) sub.textContent = 'Playback failed. Try another quality.'; return; }
+      retried = true; const at = (current?.mode === 'audio' ? audio : video).currentTime;
+      sub.textContent = 'Refreshing stream…';
+      const fresh = await api(`/api/yt/video/${id}?fresh=1`);
+      if (fresh.error || !alive) { sub.textContent = fresh.error || 'Playback failed'; return; }
+      info = fresh; fill(); choose(quality.value, at);
+    }
+    video.addEventListener('error', () => { if (video.getAttribute('src')) onError(); });
+    audio.addEventListener('error', () => { if (audio.getAttribute('src')) onError(); });
+
+    function fill() {
+      quality.replaceChildren();
+      info.qualities.forEach((q, i) => quality.append(el('option', { value: String(i), text: q.label + (q.mode === 'muxed' ? ' · fast' : '') })));
+    }
+    function choose(index, at = 0) {
+      current = info.qualities[Number(index)] || info.qualities[0];
+      const wasPaused = !(at > 0) ? false : video.paused && audio.paused;
+      for (const m of [video, audio]) { m.pause(); m.removeAttribute('src'); }
+      video.classList.toggle('audio-mode', current.mode === 'audio');
+      if (current.mode === 'muxed') { video.src = current.src; }
+      else if (current.mode === 'split') { video.src = current.video; audio.src = current.audio; }
+      else { audio.src = current.audio; audio.controls = true; }
+      audio.classList.toggle('hidden', current.mode !== 'audio');
+      const main = current.mode === 'audio' ? audio : video;
+      main.addEventListener('loadedmetadata', () => { if (at) main.currentTime = at; if (!wasPaused) main.play().catch(() => {}); }, { once: true });
+      try { localStorage.setItem('sp_yt_quality', String(current.height)); } catch {}
+    }
+    quality.onchange = () => { retried = false; choose(quality.value, (current?.mode === 'audio' ? audio : video).currentTime); };
+
+    info = await api(`/api/yt/video/${id}`);
+    if (!alive) return;
+    if (info.error) { sub.textContent = info.error; return; }
+    title.textContent = info.title; sub.textContent = [info.uploaderName, formatViews(info.views)].filter(Boolean).join(' · ');
+    fill();
+    let preferred = 360; try { preferred = Number(localStorage.getItem('sp_yt_quality')) || 360; } catch {}
+    let index = info.qualities.findIndex(q => q.height === preferred && (q.mode !== 'split' || !info.qualities.some(o => o.mode === 'muxed' && o.height === preferred)));
+    if (index < 0) index = info.qualities.findIndex(q => q.mode === 'muxed');
+    if (index < 0) index = info.qualities.findIndex(q => q.mode === 'split' && q.height <= 480);
+    if (index < 0) index = 0;
+    quality.value = String(index); choose(index);
   }
 
   function renderResults(items) {
-    resultsArea.replaceChildren();
     if (!items?.length) { content.replaceChildren(el('p', { class: 'muted', text: 'No videos found' })); return; }
+    const grid = el('div', { class: 'yt-results' });
     for (const v of items) {
-      const card = el('div', { class: 'yt-card' }, [
-        el('div', { class: 'yt-thumb-wrap' }, [
-          v.thumbnail ? el('img', { src: v.thumbnail, alt: v.title || '', class: 'yt-thumb', loading: 'lazy' }) : el('div', { class: 'yt-thumb-placeholder' }),
-          v.duration ? el('span', { class: 'yt-duration', text: formatDuration(v.duration) }) : null
-        ].filter(Boolean)),
-        el('div', { class: 'yt-meta' }, [
-          el('strong', { text: v.title || 'Untitled', class: 'yt-title' }),
-          el('small', { class: 'muted', text: [v.uploaderName, formatViews(v.views)].filter(Boolean).join(' · ') })
-        ])
+      const card = el('button', { type: 'button', class: 'yt-card' }, [
+        el('div', { class: 'yt-thumb-wrap' }, [el('img', { src: v.thumbnail, alt: '', class: 'yt-thumb', loading: 'lazy' }), ...(v.live ? [el('span', { class: 'yt-duration live', text: 'LIVE' })] : v.duration ? [el('span', { class: 'yt-duration', text: formatDuration(v.duration) })] : [])]),
+        el('div', { class: 'yt-meta' }, [el('strong', { text: v.title || 'Untitled', class: 'yt-title', dir: 'auto' }), el('small', { class: 'muted', text: [v.uploaderName, formatViews(v.views)].filter(Boolean).join(' · '), dir: 'auto' })]),
       ]);
-      card.style.cursor = 'pointer';
-      card.onclick = () => playVideo(v.id, v.title);
-      resultsArea.append(card);
+      card.querySelector('img').addEventListener('error', e => { e.target.style.visibility = 'hidden'; });
+      card.onclick = () => play(v.id, v);
+      grid.append(card);
     }
-    content.replaceChildren(resultsArea);
+    content.replaceChildren(grid);
   }
-
-  async function ytSearch() {
-    const q = searchInput.value.trim();
-    if (!q) return;
-    content.replaceChildren(el('div', { class: 'thinking', text: 'Searching YouTube...' }));
-    try {
-      const r = await api(`/api/youtube/search?q=${encodeURIComponent(q)}`);
-      if (r.error) throw Error(r.error);
-      renderResults(r.items);
-    } catch (e) { content.replaceChildren(el('p', { class: 'error', text: e.message })); }
+  async function run(path, label) {
+    content.replaceChildren(el('div', { class: 'thinking', text: label }));
+    const r = await api(path);
+    if (r.error) { content.replaceChildren(el('p', { class: 'error', text: r.error })); return; }
+    renderResults(r.items);
   }
-
-  async function ytTrending() {
-    content.replaceChildren(el('div', { class: 'thinking', text: 'Loading trending...' }));
-    try {
-      const r = await api('/api/youtube/trending');
-      if (r.error) throw Error(r.error);
-      renderResults(r.items);
-    } catch (e) { content.replaceChildren(el('p', { class: 'error', text: e.message })); }
-  }
-
-  // Auto-load trending on first open
-  ytTrending();
+  function loadHome() { run('/api/yt/home', 'Loading…'); }
+  form.onsubmit = e => {
+    e.preventDefault();
+    const q = searchInput.value.trim(); if (!q) return;
+    const id = linkId(q);
+    if (id) return play(id);
+    searchInput.blur();
+    run(`/api/yt/search?q=${encodeURIComponent(q)}`, 'Searching on the server…');
+  };
+  loadHome();
 }
 
 // ======================================================
