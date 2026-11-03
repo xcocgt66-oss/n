@@ -1,0 +1,13 @@
+# Render Blueprint — deploy S-Power as a free Docker web service.
+# Dashboard: New + -> Blueprint -> pick this repo, or New + -> Web Service -> Docker.
+services:
+  - type: web
+    name: s-power
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free            # free tier: 512MB RAM, sleeps after ~15 min idle, no persistent disk
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: SPOWER_PASSWORD
+        sync: false        # you type the value (1010) in the Render dashboard, not stored in the repo
