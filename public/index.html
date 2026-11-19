@@ -1,2 +1,149 @@
-<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Blank</title><link rel="stylesheet" href="/style.css"><script src="/sp-shared.js"></script><script src="/chat-transport.js" defer></script><script src="/app.js" defer></script></head><body></body></html>
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>بروكسي تيوب | YouTube HTTPS Proxy</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand" id="homeBtn" title="الصفحة الرئيسية">
+      <span class="brand-icon">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+          <path d="M8 5v14l11-7z"/>
+        </svg>
+      </span>
+      <span class="brand-name">بروكسي<strong>تيوب</strong></span>
+      <span class="badge-https">HTTPS فقط</span>
+    </div>
+
+    <form id="searchForm" class="search-box">
+      <input
+        type="text"
+        id="searchInput"
+        placeholder="ابحث في يوتيوب أو الصق رابط فيديو..."
+        autocomplete="off"
+      />
+      <button type="submit" aria-label="بحث">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="7"/>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+      </button>
+    </form>
+
+    <div class="top-actions">
+      <button id="historyBtn" class="icon-btn" title="السجل">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="9"/>
+          <polyline points="12 7 12 12 15 15"/>
+        </svg>
+      </button>
+      <button id="settingsBtn" class="icon-btn" title="الإعدادات">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <nav class="chips-bar" id="chipsBar">
+    <button class="chip active" data-cat="all">الرائج</button>
+    <button class="chip" data-cat="gaming">ألعاب</button>
+    <button class="chip" data-cat="tech">تقنية</button>
+    <button class="chip" data-cat="coding">برمجة</button>
+    <button class="chip" data-cat="cars">سيارات</button>
+    <button class="chip" data-cat="podcast">بودكاست</button>
+    <button class="chip" data-cat="music">موسيقى</button>
+    <button class="chip" data-cat="sports">رياضة</button>
+  </nav>
+
+  <main class="container">
+    <!-- Status / Error Banner -->
+    <div id="statusBanner" class="status-banner hidden"></div>
+
+    <!-- Player View -->
+    <section id="playerSection" class="player-layout hidden">
+      <div class="player-main">
+        <button id="backBtn" class="back-btn">← العودة للنتائج</button>
+        <div class="video-wrapper">
+          <video id="videoPlayer" controls playsinline preload="metadata"></video>
+          <div id="playerLoader" class="player-loader hidden">
+            <div class="spinner"></div>
+            <span>جاري سحب الفيديو عبر البروكسي...</span>
+          </div>
+        </div>
+
+        <div class="player-controls-bar">
+          <div class="quality-group">
+            <label for="qualitySelect">الجودة:</label>
+            <select id="qualitySelect"></select>
+          </div>
+          <div class="meta-pills">
+            <span id="sourceBadge" class="pill"></span>
+            <button id="copyLinkBtn" class="pill action-pill">نسخ رابط المشاهدة</button>
+          </div>
+        </div>
+
+        <h1 id="videoTitle" class="video-title"></h1>
+        <div class="video-meta-row">
+          <span id="videoAuthor" class="video-author"></span>
+          <span id="videoViews"></span>
+          <span id="videoPublished"></span>
+        </div>
+
+        <details class="description-box">
+          <summary>الوصف</summary>
+          <p id="videoDescription"></p>
+        </details>
+      </div>
+
+      <aside class="related-col">
+        <h3>مقاطع مقترحة</h3>
+        <div id="relatedList" class="related-list"></div>
+      </aside>
+    </section>
+
+    <!-- Grid View -->
+    <section id="gridSection">
+      <div class="section-header">
+        <h2 id="gridHeading">مقاطع رائجة</h2>
+        <span id="gridSource" class="muted-text"></span>
+      </div>
+      <div id="videoGrid" class="video-grid"></div>
+    </section>
+  </main>
+
+  <!-- Settings Modal -->
+  <div id="settingsModal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>إعدادات البروكسي</h3>
+        <button id="closeSettings" class="icon-btn">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="hint">
+          جميع الطلبات (البحث، الصور، وتشغيل الفيديو) تمر عبر سيرفر Vercel باستخدام HTTPS فقط بدون WebSockets.
+          إذا واجهت بطء أو حظر مؤقت، يمكنك إدخال رابط سيرفر Piped أو Invidious بديل هنا:
+        </p>
+        <label class="field">
+          <span>رابط Piped API مخصص (اختياري)</span>
+          <input type="url" id="customPipedInput" placeholder="https://pipedapi.kavin.rocks" dir="ltr" />
+        </label>
+        <label class="field">
+          <span>رابط Invidious مخصص (اختياري)</span>
+          <input type="url" id="customInvidiousInput" placeholder="https://inv.nadeko.net" dir="ltr" />
+        </label>
+        <div class="modal-actions">
+          <button id="saveSettingsBtn" class="btn-primary">حفظ الإعدادات</button>
+          <button id="clearHistoryBtn" class="btn-secondary">مسح سجل المشاهدة</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
