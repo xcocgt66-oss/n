@@ -1,9 +1,5 @@
 node_modules/
+.vercel/
 .env
-data/
-__pycache__/
-.venv/
-agent/vendor/
-agent/installer-cache/
-agent/host-config.json
-agent/engine.log
+.env.local
+.DS_Store

@@ -1,24 +1,9 @@
 {
-  "name": "s-power",
-  "version": "1.5.1",
-  "private": true,
+  "name": "youtube-proxy-vercel",
+  "version": "1.0.0",
+  "description": "Full HTTPS YouTube Search & Video Player Proxy for Vercel (Zero WebSockets, Zero Paid APIs)",
   "type": "module",
   "engines": {
-    "node": ">=22"
-  },
-  "scripts": {
-    "start": "node server.js",
-    "test": "node --test"
-  },
-  "dependencies": {
-    "@mercuryworkshop/bare-as-module3": "^2.2.5",
-    "@mercuryworkshop/bare-mux": "^2.1.9",
-    "@titaniumnetwork-dev/ultraviolet": "^3.2.10",
-    "@tomphttp/bare-server-node": "^2.0.6",
-    "express": "4.21.2",
-    "web-push": "3.6.7"
-  },
-  "devDependencies": {
-    "playwright": "1.55.0"
+    "node": ">=18.x"
   }
 }
